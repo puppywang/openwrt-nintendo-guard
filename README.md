@@ -35,19 +35,19 @@
 
 | 系统 | 检查架构 | 下载文件 |
 | --- | --- | --- |
-| 新版 PonWrt / OpenWrt，使用 apk | `apk --print-arch` | 对应架构后端 `.apk` + `luci-app-nintendo-guard-0.1.1-r1.noarch.apk` |
-| 使用 opkg 的 OpenWrt | `opkg print-architecture` | 对应架构后端 `.ipk` + `luci-app-nintendo-guard_0.1.1-1_all.ipk` |
+| 新版 PonWrt / OpenWrt，使用 apk | `apk --print-arch` | 对应架构后端 `.apk` + `luci-app-nintendo-guard-0.1.2-r1.noarch.apk` |
+| 使用 opkg 的 OpenWrt | `opkg print-architecture` | 对应架构后端 `.ipk` + `luci-app-nintendo-guard_0.1.2-1_all.ipk` |
 
 例如 ZN504 / PonWrt 的架构是 `aarch64_cortex-a53`，应下载：
 
-- `nintendo-guard-0.1.1-r1.aarch64_cortex-a53.apk`
-- `luci-app-nintendo-guard-0.1.1-r1.noarch.apk`
+- `nintendo-guard-0.1.2-r1.aarch64_cortex-a53.apk`
+- `luci-app-nintendo-guard-0.1.2-r1.noarch.apk`
 
 将这两个文件上传到路由器 `/tmp`，与 Release 的 `SHA256SUMS` 核对后安装：
 
 ```sh
 cd /tmp
-apk add --allow-untrusted ./nintendo-guard-0.1.1-r1.aarch64_cortex-a53.apk ./luci-app-nintendo-guard-0.1.1-r1.noarch.apk
+apk add --allow-untrusted ./nintendo-guard-0.1.2-r1.aarch64_cortex-a53.apk ./luci-app-nintendo-guard-0.1.2-r1.noarch.apk
 ```
 
 这些是本项目自行构建的第三方包，未使用 OpenWrt 官方签名；`--allow-untrusted` 只用于此次本地文件安装。若 LuCI 上传安装时因签名被拒绝，请用上面的 SSH 命令。
@@ -55,7 +55,7 @@ apk add --allow-untrusted ./nintendo-guard-0.1.1-r1.aarch64_cortex-a53.apk ./luc
 旧版 OpenWrt 的对应安装方式（同样需要 firewall4）：
 
 ```sh
-opkg install ./nintendo-guard_0.1.1-1_aarch64_cortex-a53.ipk ./luci-app-nintendo-guard_0.1.1-1_all.ipk
+opkg install ./nintendo-guard_0.1.2-1_aarch64_cortex-a53.ipk ./luci-app-nintendo-guard_0.1.2-1_all.ipk
 ```
 
 依赖会由包管理器检查。后端依赖 firewall4、nftables、conntrack、ip-full、procd 和 busybox；界面依赖 luci-base 和 rpcd。
@@ -69,8 +69,8 @@ opkg install ./nintendo-guard_0.1.1-1_aarch64_cortex-a53.ipk ./luci-app-nintendo
 `.tar.gz` 是另一种分发方式，不能直接交给 apk/opkg 或 LuCI 软件包上传页面。若要使用，下载匹配 CPU 的包，解压后执行：
 
 ```sh
-tar -xzf nintendo-guard-v0.1.1-linux-arm64.tar.gz
-cd nintendo-guard-v0.1.1-linux-arm64
+tar -xzf nintendo-guard-v0.1.2-linux-arm64.tar.gz
+cd nintendo-guard-v0.1.2-linux-arm64
 sh install.sh
 ```
 
@@ -127,12 +127,12 @@ opkg remove luci-app-nintendo-guard nintendo-guard
 ```sh
 go test ./...
 go vet ./...
-python3 scripts/build.py --version v0.1.1
+python3 scripts/build.py --version v0.1.2
 ```
 
-原生包构建还需 Linux 和带 mkpkg 的完整 apk-tools 3。可先执行 `sh scripts/build_apk_host.sh`，再执行 `fakeroot python3 scripts/build_native.py --version v0.1.1 --apk build/apk-tools/out/src/apk`。
+原生包构建还需 Linux 和带 mkpkg 的完整 apk-tools 3。可先执行 `sh scripts/build_apk_host.sh`，再执行 `fakeroot python3 scripts/build_native.py --version v0.1.2 --apk build/apk-tools/out/src/apk`。
 
-构建结果在 `dist/v0.1.1/`，包含安装脚本、对应架构的静态二进制、许可证和 SHA256SUMS。`--arch arm64` 可只构建一个架构。
+构建结果在 `dist/v0.1.2/`，包含安装脚本、对应架构的静态二进制、许可证和 SHA256SUMS。`--arch arm64` 可只构建一个架构。
 
 Linux 网络测试需要 root、nftables、conntrack、iproute2、openssl，并只在隔离网络命名空间内运行：
 
@@ -142,6 +142,26 @@ sudo timeout 90 unshare --net python3 tests/network_integration.py build/nintend
 ```
 
 GitHub Actions 运行单元测试、race detector、网络测试及多架构构建。欢迎提交具体型号、固件版本和去掉私人信息的日志；不要上传路由器备份、代理密钥或抓包中的个人数据。
+
+## GitHub Actions 自动打包与发布
+
+整个构建和发布流程位于 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)：
+
+- main 提交、PR、手动 Run workflow：执行测试并生成 `release-bundles` Artifact，可从对应 Actions 运行页面下载。
+- 推送 `vX.Y.Z` 标签：全部测试通过后，自动把本次运行的 20 个文件发布为 GitHub 预览版 Release。
+- 发布前检查完整文件清单及 SHA256，上传后比对 GitHub 返回的摘要，通过后公开草稿。
+- 失败的草稿可重跑补传；已公开版本只核验，不覆盖现有资产。更改代码请使用新版本标签。
+
+发布使用仓库自动提供的 `GITHUB_TOKEN`，仅发布任务申请 `contents: write`，无需设置个人 Token 或手动上传二进制。
+
+维护者准备好修改后，更新 `VERSION`，可选添加 `docs/release-vX.Y.Z.md`，提交并推送，然后推送标签。例如下一版：
+
+```sh
+git tag v0.1.3
+git push origin v0.1.3
+```
+
+不必先在 GitHub 网页创建 Release。有对应说明文件时采用该文件，否则自动生成发布说明。当前版本仍以预览版形式发布。
 
 ## 域名依据
 

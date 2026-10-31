@@ -17,13 +17,13 @@ Use the native packages in Releases. APK systems report their exact package arch
 For PonWrt on `aarch64_cortex-a53`:
 
 ```sh
-apk add --allow-untrusted ./nintendo-guard-0.1.1-r1.aarch64_cortex-a53.apk ./luci-app-nintendo-guard-0.1.1-r1.noarch.apk
+apk add --allow-untrusted ./nintendo-guard-0.1.2-r1.aarch64_cortex-a53.apk ./luci-app-nintendo-guard-0.1.2-r1.noarch.apk
 ```
 
 For opkg-based firewall4 systems:
 
 ```sh
-opkg install ./nintendo-guard_0.1.1-1_aarch64_cortex-a53.ipk ./luci-app-nintendo-guard_0.1.1-1_all.ipk
+opkg install ./nintendo-guard_0.1.2-1_aarch64_cortex-a53.ipk ./luci-app-nintendo-guard_0.1.2-1_all.ipk
 ```
 
 These are third-party packages, not signed with OpenWrt's official key; `--allow-untrusted` applies to this local-file installation. Package managers track files/dependencies and support upgrades/removal. Existing JSON settings are retained; fresh installations default to OFF. Re-login and open **Network → Nintendo Control**. The UI is currently Chinese.
@@ -42,7 +42,7 @@ ARM64/PonWrt is the original hardware test platform. Other architectures still n
 - One target MAC is supported. Switching modes reconnects affected flows. If the service crashes, rules remain to preserve blocking.
 - Boot persistence does not guarantee survival across a router firmware flash.
 
-Disable from LuCI. Native installations should be removed with `apk del luci-app-nintendo-guard nintendo-guard` or `opkg remove luci-app-nintendo-guard nintendo-guard`. Only manual tar installations use `sh uninstall.sh` from the extracted bundle. Uninstallation removes only this feature's files/table/include and retains a configuration backup. It does not restore an old complete firewall configuration.
+Disable from LuCI. Native installations should be removed with `apk del luci-app-nintendo-guard nintendo-guard` or `opkg remove luci-app-nintendo-guard nintendo-guard`. Only manual tar installations use `sh uninstall.sh` from the extracted bundle. Uninstallation removes only this feature's files/table/include and retains device settings. It does not restore an old complete firewall configuration.
 
 ## Develop
 
@@ -51,9 +51,15 @@ Go 1.24.4+ and Python 3:
 ```sh
 go test ./...
 go vet ./...
-python3 scripts/build.py --version v0.1.1
+python3 scripts/build.py --version v0.1.2
 ```
 
 See the Chinese README for namespace integration tests, endpoint references and details. Configuration is `/etc/nintendo-control.json`; management uses a root-only Unix socket and LuCI/rpcd ACL. No telemetry or cloud account is used.
 
 MIT License. Not affiliated with or endorsed by Nintendo.
+
+## Automated GitHub releases
+
+Main/PR/manual workflow runs test and build the complete `release-bundles` artifact. Pushing a `vX.Y.Z` tag additionally publishes a preview GitHub Release after all checks pass, using the artifacts from that same run. All 20 files and their checksums are validated before and after upload.
+
+Update `VERSION`, commit the changes and optional `docs/release-vX.Y.Z.md`, push the commit, then push the version tag. No manual upload or personal token is required: only the release job receives `contents: write` through the built-in `GITHUB_TOKEN`. Reruns can complete failed drafts; already-public assets are verified and retained. Use a new version tag for code changes.
