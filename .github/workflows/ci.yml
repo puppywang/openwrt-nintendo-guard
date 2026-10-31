@@ -19,7 +19,10 @@ jobs:
       - run: go test -race ./...
       - run: go vet ./...
       - run: node --check luci/nintendo.js
-      - run: sh -n install.sh uninstall.sh packaging/lifecycle.sh scripts/build_apk_host.sh luci/nintendo-control.init luci/nintendo-control.rpc luci/nintendo-control-firewall
+      - run: |
+          for script in install.sh uninstall.sh packaging/lifecycle.sh scripts/build_apk_host.sh luci/nintendo-control.init luci/nintendo-control.rpc luci/nintendo-control-firewall; do
+            sh -n "$script"
+          done
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables conntrack iproute2 openssl meson ninja-build pkg-config libssl-dev zlib1g-dev libzstd-dev busybox-static fakeroot
       - run: go build -o build/nintendo-guard ./cmd/nintendo-guard
       - name: Network namespace integration

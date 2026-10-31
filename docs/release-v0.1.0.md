@@ -1,3 +1,5 @@
+本版本提供的是手工安装压缩包，不能直接交给 apk/opkg 或 LuCI 软件包页面。解压后运行 `sh install.sh`；原生 APK/IPK 请使用 [v0.1.1](https://github.com/puppywang/openwrt-nintendo-guard/releases/tag/v0.1.1)。
+
 首个公开预览版。面向使用 firewall4/nftables 的 OpenWrt/PonWrt。
 
 - LuCI 页面按 MAC 配置关闭、系统更新域名拦截、设备外网隔离。
