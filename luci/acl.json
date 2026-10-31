@@ -1,0 +1,7 @@
+{
+  "luci-app-nintendo-control": {
+    "description": "Nintendo per-device firmware and service filtering",
+    "read": { "ubus": { "nintendo-control": [ "status" ] } },
+    "write": { "ubus": { "nintendo-control": [ "set" ] } }
+  }
+}

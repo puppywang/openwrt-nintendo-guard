@@ -1,0 +1,185 @@
+"""Run as root INSIDE `unshare --net`; no production router is involved."""
+import http.server
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+SELF = str(Path(__file__).resolve())
+UPDATE = "sun.p01.lp1.d4c.srv.nintendo.net"
+GAME = "atum.p01.lp1.d4c.srv.nintendo.net"
+MAC = "02:aa:bb:cc:dd:01"
+
+
+def command(*args, **kwargs):
+    return subprocess.run(list(args), capture_output=True, text=True, timeout=10, check=True, **kwargs)
+
+
+def client(kind, host, destination):
+    try:
+        if kind == "dns":
+            q = struct.pack("!HHHHHH", 123, 0x100, 1, 0, 0, 0)
+            q += b"".join(bytes([len(part)]) + part.encode() for part in host.split(".")) + b"\0\0\1\0\1"
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(2); sock.sendto(q, (destination, 53))
+                reply = sock.recv(4096)
+            return {"rcode": reply[3] & 15}
+        if kind == "udp":
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(2); sock.sendto(b"ping", (destination, 9999))
+                return {"ok": sock.recv(64) == b"ping"}
+        with socket.create_connection((destination, 443 if kind == "tls" else 80), 2) as raw:
+            sock = ssl._create_unverified_context().wrap_socket(raw, server_hostname=host) if kind == "tls" else raw
+            with sock:
+                sock.sendall(("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n").encode())
+                return {"ok": b"200" in sock.recv(2048)}
+    except (OSError, ssl.SSLError) as error:
+        return {"ok": False, "error": type(error).__name__}
+
+
+def fixture(cert, key):
+    # Child fixture cannot outlive a lost parent indefinitely.
+    threading.Timer(75, lambda: os._exit(0)).start()
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        def log_message(self, *_):
+            pass
+    for port in (80, 443):
+        server = http.server.HTTPServer(("0.0.0.0", port), Handler)
+        if port == 443:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); context.load_cert_chain(cert, key)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        udp.bind(("0.0.0.0", 9999))
+        print("ready", flush=True)
+        while True:
+            data, address = udp.recvfrom(4096); udp.sendto(data, address)
+
+
+def main(binary):
+    if os.geteuid() != 0:
+        raise SystemExit("Run inside sudo unshare --net")
+    # Refuse the host namespace even if invoked incorrectly as root.
+    if os.readlink("/proc/self/ns/net") == os.readlink("/proc/1/ns/net"):
+        raise SystemExit("Refusing to run in the host network namespace")
+    processes, namespaces, dns_sockets = [], [], []
+    def stop(proc):
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try: proc.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL); proc.wait(timeout=2)
+    def spawn(args, **kwargs):
+        proc = subprocess.Popen(args, start_new_session=True, **kwargs)
+        processes.append(proc); return proc
+    def terminate(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, terminate)
+    with tempfile.TemporaryDirectory(prefix="nintendo-guard-test-") as work:
+        try:
+            env = dict(os.environ, NINTENDO_GUARD_CONFIG=work+"/config.json", NINTENDO_GUARD_SOCKET=work+"/control.sock")
+            command("ip", "link", "set", "lo", "up")
+            command("sysctl", "-qw", "net.ipv4.ip_forward=1")
+            def network(label, subnet, mac):
+                ns = "ng-" + str(os.getpid()) + "-" + label
+                command("ip", "netns", "add", ns); namespaces.append(ns)
+                host, peer = "ng-"+label, "ng-peer-"+label
+                command("ip", "link", "add", host, "type", "veth", "peer", "name", peer)
+                command("ip", "link", "set", peer, "netns", ns)
+                command("ip", "addr", "add", subnet+".1/24", "dev", host)
+                command("ip", "link", "set", host, "up")
+                prefix = ["ip", "netns", "exec", ns, "ip"]
+                command(*prefix, "link", "set", "lo", "up")
+                command(*prefix, "link", "set", peer, "address", mac)
+                command(*prefix, "addr", "add", subnet+".2/24", "dev", peer)
+                command(*prefix, "link", "set", peer, "up")
+                command(*prefix, "route", "add", "default", "via", subnet+".1")
+                return ns
+            target = network("t", "192.0.2", MAC)
+            other = network("c", "203.0.113", "02:aa:bb:cc:dd:02")
+            server = network("s", "198.51.100", "02:aa:bb:cc:dd:03")
+            cert, key = work+"/cert.pem", work+"/key.pem"
+            command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=test.invalid")
+            helper = spawn(["ip", "netns", "exec", server, sys.executable, SELF, "--server", cert, key], stdout=subprocess.PIPE, text=True)
+            assert helper.stdout.readline().strip() == "ready"
+            def dns_server(sock):
+                while True:
+                    try:
+                        packet, address = sock.recvfrom(4096)
+                        reply = packet[:2] + b"\x81\x80\0\1\0\1\0\0\0\0" + packet[12:]
+                        reply += b"\xc0\x0c\0\1\0\1\0\0\0\x3c\0\4" + socket.inet_aton("198.51.100.2")
+                        sock.sendto(reply, address)
+                    except OSError: return
+            for port in (53, 15353):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); sock.bind(("0.0.0.0", port)); dns_sockets.append(sock)
+                threading.Thread(target=dns_server, args=(sock,), daemon=True).start()
+            config = {"mode":"off", "mac":"", "upstream":"127.0.0.1:15353"}
+            Path(env["NINTENDO_GUARD_CONFIG"]).write_text(json.dumps(config))
+            binary = str(Path(binary).resolve())
+            def start():
+                proc = spawn(["timeout", "75", binary, "serve"], env=env, stderr=subprocess.PIPE, text=True)
+                for _ in range(40):
+                    result = subprocess.run([binary,"status"], env=env, capture_output=True, text=True, timeout=3)
+                    if result.returncode == 0: return proc
+                    if proc.poll() is not None: raise RuntimeError(proc.stderr.read())
+                    time.sleep(.1)
+                raise RuntimeError("service readiness timeout")
+            guard = start()
+            def set_mode(mode):
+                config.update(mode=mode, mac=MAC)
+                status = json.loads(command(binary,"set",input=json.dumps(config),env=env).stdout)
+                assert status["firewall_ok"], status
+            def query(ns, kind, name=GAME, dest="198.51.100.2"):
+                return json.loads(command("ip","netns","exec",ns,sys.executable,SELF,"--client",kind,name,dest).stdout)
+            set_mode("updates")
+            assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
+            assert query(target,"dns",GAME,"192.0.2.1")["rcode"] == 0
+            assert query(target,"tls")["ok"]
+            assert not query(target,"tls",UPDATE)["ok"]  # cached IP, no DNS
+            assert not query(target,"http",UPDATE)["ok"]
+            assert query(other,"tls",UPDATE)["ok"]
+            assert query(target,"udp")["ok"]
+            print("PASS updates: DNS, cached-IP TLS/HTTP, other client, UDP", flush=True)
+            set_mode("all")
+            assert query(target,"dns",GAME,"192.0.2.1")["rcode"] == 3
+            assert not query(target,"tls")["ok"]
+            assert not query(target,"udp")["ok"]
+            assert query(other,"tls")["ok"]
+            assert query(other,"udp")["ok"]
+            print("PASS full isolation: selected client only", flush=True)
+            set_mode("off")
+            assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 0
+            assert query(target,"tls",UPDATE)["ok"]
+            print("PASS off: normal route restored", flush=True)
+            set_mode("updates")
+            stop(guard); guard = start()
+            assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
+            command("nft","delete","table","inet","nintendo_control")
+            restored = False
+            for _ in range(65):
+                status = json.loads(command(binary,"status",env=env).stdout)
+                if status["firewall_ok"]: restored=True; break
+                time.sleep(.2)
+            assert restored
+            print("PASS restart persistence and table recovery", flush=True)
+        finally:
+            for proc in reversed(processes): stop(proc)
+            for sock in dns_sockets: sock.close()
+            for ns in reversed(namespaces):
+                subprocess.run(["ip","netns","delete",ns], capture_output=True, timeout=5)
+
+
+if __name__ == "__main__":
+    if sys.argv[1] == "--client": print(json.dumps(client(*sys.argv[2:])))
+    elif sys.argv[1] == "--server": fixture(*sys.argv[2:])
+    else: main(sys.argv[1])

@@ -1,0 +1,7 @@
+/dist/
+/build/
+/.tmp/
+__pycache__/
+*.pyc
+*.exe
+*.pcap
