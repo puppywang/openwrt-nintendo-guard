@@ -2,6 +2,10 @@
 set -eu
 cd "$(dirname "$0")"
 [ "$(id -u)" = 0 ] || { echo 'Run as root on the router.' >&2; exit 1; }
+if { command -v apk >/dev/null && apk info -e nintendo-guard >/dev/null 2>&1; } ||
+   { command -v opkg >/dev/null && opkg list-installed nintendo-guard | grep -q '^nintendo-guard '; }; then
+ echo 'Nintendo Guard is package-managed. Upgrade using apk/opkg instead.' >&2; exit 1
+fi
 for cmd in nft fw4 uci ubus conntrack timeout ip; do
  command -v "$cmd" >/dev/null || { echo "Missing dependency: $cmd" >&2; exit 1; }
 done

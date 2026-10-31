@@ -31,30 +31,50 @@
 
 ## 安装
 
-1. 在路由器运行 `uname -m`，从 Releases 下载对应压缩包及 `SHA256SUMS`。
+从 Releases 下载原生安装包，先用 **包管理器报告的架构** 选包，而不是只看 `uname -m`。
 
-   | `uname -m` / 平台 | 包名结尾 |
-   | --- | --- |
-   | `aarch64` | `linux-arm64.tar.gz` |
-   | `x86_64` | `linux-amd64.tar.gz` |
-   | `armv7l` | `linux-armv7.tar.gz` |
-   | MIPS 小端 / 大端（需确认端序） | `linux-mipsle.tar.gz` / `linux-mips.tar.gz` |
+| 系统 | 检查架构 | 下载文件 |
+| --- | --- | --- |
+| 新版 PonWrt / OpenWrt，使用 apk | `apk --print-arch` | 对应架构后端 `.apk` + `luci-app-nintendo-guard-0.1.1-r1.noarch.apk` |
+| 使用 opkg 的 OpenWrt | `opkg print-architecture` | 对应架构后端 `.ipk` + `luci-app-nintendo-guard_0.1.1-1_all.ipk` |
 
-2. 缺少依赖时，用路由器的包管理器安装 `conntrack`；缺少 LuCI / firewall4 时先配置这些组件。安装脚本会在修改前检查依赖和 CPU 可执行性。
-3. 将压缩包复制到路由器 `/tmp`，核对校验值，解压后安装。例如 ARM64：
+例如 ZN504 / PonWrt 的架构是 `aarch64_cortex-a53`，应下载：
 
-   ```sh
-   sha256sum nintendo-guard-v0.1.0-linux-arm64.tar.gz
-   # 与 Releases 中 SHA256SUMS 对应行比较
-   tar -xzf nintendo-guard-v0.1.0-linux-arm64.tar.gz
-   cd nintendo-guard-v0.1.0-linux-arm64
-   sh install.sh
-   ```
+- `nintendo-guard-0.1.1-r1.aarch64_cortex-a53.apk`
+- `luci-app-nintendo-guard-0.1.1-r1.noarch.apk`
 
-4. 重新登录 LuCI，进入 **网络 → Nintendo 控制**，填入主机 MAC，选择模式并保存。
-5. 上游 DNS 默认 `127.0.0.1:53`，通常是路由器的 dnsmasq。使用 SmartDNS、AdGuard Home 等其他端口时，填写实际的 **IP:端口**。不要指向本程序的 `5354` 端口，也不要让上游 DNS 再转回本程序。
+将这两个文件上传到路由器 `/tmp`，与 Release 的 `SHA256SUMS` 核对后安装：
 
-首次安装不会自动屏蔽任何设备。升级安装保留已有配置。安装前会在 `/root/nintendo-control-backup-*` 保存原文件。安装过程会重启 rpcd，LuCI 可能需要重新登录。
+```sh
+cd /tmp
+apk add --allow-untrusted ./nintendo-guard-0.1.1-r1.aarch64_cortex-a53.apk ./luci-app-nintendo-guard-0.1.1-r1.noarch.apk
+```
+
+这些是本项目自行构建的第三方包，未使用 OpenWrt 官方签名；`--allow-untrusted` 只用于此次本地文件安装。若 LuCI 上传安装时因签名被拒绝，请用上面的 SSH 命令。
+
+旧版 OpenWrt 的对应安装方式（同样需要 firewall4）：
+
+```sh
+opkg install ./nintendo-guard_0.1.1-1_aarch64_cortex-a53.ipk ./luci-app-nintendo-guard_0.1.1-1_all.ipk
+```
+
+依赖会由包管理器检查。后端依赖 firewall4、nftables、conntrack、ip-full、procd 和 busybox；界面依赖 luci-base 和 rpcd。
+
+安装完成后重新登录 LuCI，进入 **网络 → Nintendo 控制**，填写自己的主机 MAC，再选择模式并保存。首次安装默认为关闭；已有 `/etc/nintendo-control.json` 会原样保留。文件由包管理器登记，不需要另运行 `install.sh`。
+
+上游 DNS 默认 `127.0.0.1:53`，通常是路由器的 dnsmasq。使用其他 DNS 服务时填写实际 **IP:端口**。不要指向本程序的 `5354`，也不要让上游 DNS 转回本程序。脚本安装迁移到原生包前，可先备份该 JSON。
+
+### 压缩包手工安装（含旧版 v0.1.0）
+
+`.tar.gz` 是另一种分发方式，不能直接交给 apk/opkg 或 LuCI 软件包上传页面。若要使用，下载匹配 CPU 的包，解压后执行：
+
+```sh
+tar -xzf nintendo-guard-v0.1.1-linux-arm64.tar.gz
+cd nintendo-guard-v0.1.1-linux-arm64
+sh install.sh
+```
+
+v0.1.0 下载包把上述版本改成 v0.1.0 即可。`aarch64` 用 arm64，`x86_64` 用 amd64，`armv7l` 用 armv7；MIPS 需要确认端序。手工安装会检查依赖并备份原文件到 `/root/nintendo-control-backup-*`，不会进入包管理器数据库。
 
 ## 怎样测试
 
@@ -86,7 +106,17 @@ nslookup atum.p01.lp1.d4c.srv.nintendo.net 127.0.0.1:5354
 
 临时关闭：在页面选择“关闭拦截”并保存。
 
-卸载：在解压目录执行 `sh uninstall.sh`。脚本停止服务、移除本功能的 nft 表和 firewall include、清理目标旧连接，并保留配置备份；不恢复整份旧防火墙，以免覆盖其他后续修改。
+原生包安装请使用对应的包管理器：
+
+```sh
+apk del luci-app-nintendo-guard nintendo-guard
+# 使用 opkg 的系统：
+opkg remove luci-app-nintendo-guard nintendo-guard
+```
+
+移除时会停止服务、清除本功能规则及相关连接，并保留设备配置 JSON 供重装使用。只移除界面包会保留后端服务，请同时移除两个包以完整卸载。
+
+压缩包手工安装才使用 `sh uninstall.sh`。脚本和原生包的卸载方式不要混用。
 
 配置位于 `/etc/nintendo-control.json`，管理接口为权限 0600 的 Unix socket。网页沿用 LuCI 登录和专用 rpcd ACL。没有遥测、云端账号或额外 HTTP 管理端口。
 
@@ -97,10 +127,12 @@ nslookup atum.p01.lp1.d4c.srv.nintendo.net 127.0.0.1:5354
 ```sh
 go test ./...
 go vet ./...
-python3 scripts/build.py --version v0.1.0
+python3 scripts/build.py --version v0.1.1
 ```
 
-构建结果在 `dist/v0.1.0/`，包含安装脚本、对应架构的静态二进制、许可证和 SHA256SUMS。`--arch arm64` 可只构建一个架构。
+原生包构建还需 Linux 和带 mkpkg 的完整 apk-tools 3。可先执行 `sh scripts/build_apk_host.sh`，再执行 `fakeroot python3 scripts/build_native.py --version v0.1.1 --apk build/apk-tools/out/src/apk`。
+
+构建结果在 `dist/v0.1.1/`，包含安装脚本、对应架构的静态二进制、许可证和 SHA256SUMS。`--arch arm64` 可只构建一个架构。
 
 Linux 网络测试需要 root、nftables、conntrack、iproute2、openssl，并只在隔离网络命名空间内运行：
 

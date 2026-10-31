@@ -19,15 +19,25 @@ jobs:
       - run: go test -race ./...
       - run: go vet ./...
       - run: node --check luci/nintendo.js
-      - run: sh -n install.sh uninstall.sh luci/nintendo-control.init luci/nintendo-control.rpc luci/nintendo-control-firewall
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables conntrack iproute2 openssl
+      - run: sh -n install.sh uninstall.sh packaging/lifecycle.sh scripts/build_apk_host.sh luci/nintendo-control.init luci/nintendo-control.rpc luci/nintendo-control-firewall
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables conntrack iproute2 openssl meson ninja-build pkg-config libssl-dev zlib1g-dev libzstd-dev busybox-static fakeroot
       - run: go build -o build/nintendo-guard ./cmd/nintendo-guard
       - name: Network namespace integration
         run: sudo timeout 90 unshare --net python3 tests/network_integration.py build/nintendo-guard
       - name: Build release bundles
         env:
           BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
-        run: python3 scripts/build.py --version "$BUILD_VERSION"
+        run: python3 scripts/build.py --version "${BUILD_VERSION/dev/$(cat VERSION)}"
+      - name: Build native APK and IPK packages
+        env:
+          BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+        run: |
+          sh scripts/build_apk_host.sh
+          fakeroot python3 scripts/build_native.py --version "${BUILD_VERSION/dev/$(cat VERSION)}" --apk build/apk-tools/out/src/apk
+      - name: Native package installation, upgrade and removal tests
+        env:
+          BUILD_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+        run: sudo python3 tests/native_packages.py --version "${BUILD_VERSION/dev/$(cat VERSION)}" --apk build/apk-tools/out/src/apk
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-bundles

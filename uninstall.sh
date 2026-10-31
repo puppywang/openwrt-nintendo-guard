@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 [ "$(id -u)" = 0 ] || { echo 'Run as root.' >&2; exit 1; }
+if { command -v apk >/dev/null && apk info -e nintendo-guard >/dev/null 2>&1; } ||
+   { command -v opkg >/dev/null && opkg list-installed nintendo-guard | grep -q '^nintendo-guard '; }; then
+ echo 'Use apk del or opkg remove for a package-managed installation.' >&2; exit 1
+fi
 backup="/root/nintendo-control-uninstall-$(date +%Y%m%d-%H%M%S)-$$.json"
 cp -p /etc/nintendo-control.json "$backup"
 /etc/init.d/nintendo-control disable
