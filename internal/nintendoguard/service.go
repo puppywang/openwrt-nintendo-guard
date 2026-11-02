@@ -333,7 +333,8 @@ func (s *Service) status() map[string]any {
 		"dns_blocked": s.dnsBlocked, "https_blocked": s.tlsBlocked, "allowed": s.allowed,
 		"active_connections": len(s.flows), "recent": append([]Event{}, s.events...),
 		"error": s.lastError, "started": s.started.Format(time.RFC3339),
-		"update_domains": UpdateDomains,
+		"update_domains":   UpdateDomains,
+		"nintendo_domains": NintendoDomains, "connection_test_domains": ConnectionTestDomains,
 	}
 	s.mu.RUnlock()
 	addresses := deviceAddresses()
@@ -356,6 +357,12 @@ func (s *Service) dns(w dns.ResponseWriter, req *dns.Msg) {
 
 func (s *Service) dnsMode(mode string, w dns.ResponseWriter, req *dns.Msg) {
 	c := s.current()
+	if len(req.Question) != 1 {
+		resp := new(dns.Msg)
+		resp.SetRcode(req, dns.RcodeFormatError)
+		w.WriteMsg(resp)
+		return
+	}
 	// With no redirection installed, the listener must not become an open resolver.
 	if !c.HasMode(mode) {
 		resp := new(dns.Msg)
@@ -366,11 +373,30 @@ func (s *Service) dnsMode(mode string, w dns.ResponseWriter, req *dns.Msg) {
 	for _, q := range req.Question {
 		if (Device{Mode: mode}).Blocks(q.Name) {
 			s.blocked("DNS", strings.TrimSuffix(q.Name, "."), w.RemoteAddr().String())
+			if mode == "nintendo" {
+				w.WriteMsg(nintendoReply(req, net.IPv4zero, true))
+				return
+			}
 			resp := new(dns.Msg)
 			resp.SetRcode(req, dns.RcodeNameError)
 			resp.RecursionAvailable = true
 			w.WriteMsg(resp)
 			return
+		}
+	}
+	if mode == "nintendo" {
+		for _, q := range req.Question {
+			if connectionTest(q.Name) {
+				ip := routerIPv4(w)
+				if ip == nil {
+					resp := new(dns.Msg)
+					resp.SetRcode(req, dns.RcodeServerFailure)
+					w.WriteMsg(resp)
+				} else {
+					w.WriteMsg(nintendoReply(req, ip, false))
+				}
+				return
+			}
 		}
 	}
 	client := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
@@ -383,10 +409,26 @@ func (s *Service) dnsMode(mode string, w dns.ResponseWriter, req *dns.Msg) {
 		resp = new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeServerFailure)
 	}
+	if err == nil && mode == "nintendo" {
+		for _, rr := range resp.Answer {
+			target := ""
+			switch alias := rr.(type) {
+			case *dns.CNAME:
+				target = alias.Target
+			case *dns.DNAME:
+				target = alias.Target
+			}
+			if target != "" && ((Device{Mode: mode}).Blocks(target) || connectionTest(target)) {
+				s.blocked("DNS", strings.TrimSuffix(req.Question[0].Name, "."), w.RemoteAddr().String())
+				resp = nintendoReply(req, net.IPv4zero, true)
+				break
+			}
+		}
+	}
 	w.WriteMsg(resp)
 }
 
-func (s *Service) handleTCP(c *net.TCPConn) {
+func (s *Service) handleTCP(c *net.TCPConn, listenerMode string) {
 	defer func() { c.Close(); <-s.limit }()
 	dest, err := OriginalDestination(c)
 	if err != nil {
@@ -406,17 +448,26 @@ func (s *Service) handleTCP(c *net.TCPConn) {
 	}
 	mac := clientMAC(c.RemoteAddr().String())
 	s.mu.Lock()
-	// Only update-mode MACs can reach this listener through the firewall.
-	// Check the current device too when a policy changed during ClientHello.
-	mode := "off"
+	// The destination port selects policy independently of address inventory.
+	// A known device changing modes during ClientHello must reconnect first.
+	mode := listenerMode
 	for _, d := range s.config.Devices {
 		if d.MAC == mac {
 			mode = d.Mode
 		}
 	}
-	if !s.config.HasMode("updates") || mode == "all" || (Device{Mode: "updates"}).Blocks(host) {
+	if !s.config.HasMode(listenerMode) || mode != listenerMode || (Device{Mode: listenerMode}).Blocks(host) {
 		s.mu.Unlock()
 		s.blocked("HTTPS/HTTP", host, c.RemoteAddr().String())
+		return
+	}
+	if listenerMode == "nintendo" && connectionTest(host) {
+		s.mu.Unlock()
+		// This is a local HTTP emulation, never a TLS MITM or an upstream dial.
+		if strings.HasSuffix(dest, ":80") {
+			c.SetWriteDeadline(time.Now().Add(3 * time.Second))
+			c.Write(connectionTestHTTP(host, raw))
+		}
 		return
 	}
 	s.flows[c] = flow{conn: c, mac: mac}
@@ -483,31 +534,49 @@ func Serve(ctx context.Context) error {
 		return err
 	}
 	s := &Service{config: c, flows: make(map[*net.TCPConn]flow), started: time.Now(), limit: make(chan struct{}, 64)}
-	tcp, err := net.ListenTCP("tcp4", &net.TCPAddr{Port: 5443})
-	if err != nil {
-		return err
+	// Bind every listener before changing firewall rules, so a port conflict
+	// leaves the installed policy intact and no partial listener set running.
+	var dnsServers []*dns.Server
+	var proxies []struct {
+		listener *net.TCPListener
+		mode     string
 	}
-	defer tcp.Close()
-	udp, err := net.ListenPacket("udp4", ":5354")
-	if err != nil {
-		return err
+	defer func() {
+		for _, server := range dnsServers {
+			if server.PacketConn != nil {
+				server.PacketConn.Close()
+			}
+			if server.Listener != nil {
+				server.Listener.Close()
+			}
+		}
+		for _, proxy := range proxies {
+			proxy.listener.Close()
+		}
+	}()
+	for _, binding := range policyListeners {
+		handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) { s.dnsMode(binding.mode, w, req) })
+		udp, e := net.ListenPacket("udp4", fmt.Sprintf(":%d", binding.dnsPort))
+		if e != nil {
+			return e
+		}
+		dnsServers = append(dnsServers, &dns.Server{PacketConn: udp, Handler: handler, MaxTCPQueries: 32})
+		tcp, e := net.Listen("tcp4", fmt.Sprintf(":%d", binding.dnsPort))
+		if e != nil {
+			return e
+		}
+		dnsServers = append(dnsServers, &dns.Server{Listener: tcp, Handler: handler, IdleTimeout: func() time.Duration { return 15 * time.Second }, MaxTCPQueries: 32})
+		if binding.tcpPort != 0 {
+			listener, e := net.ListenTCP("tcp4", &net.TCPAddr{Port: binding.tcpPort})
+			if e != nil {
+				return e
+			}
+			proxies = append(proxies, struct {
+				listener *net.TCPListener
+				mode     string
+			}{listener, binding.mode})
+		}
 	}
-	defer udp.Close()
-	dnsTCP, err := net.Listen("tcp4", ":5354")
-	if err != nil {
-		return err
-	}
-	defer dnsTCP.Close()
-	allUDP, err := net.ListenPacket("udp4", ":5355")
-	if err != nil {
-		return err
-	}
-	defer allUDP.Close()
-	allTCP, err := net.Listen("tcp4", ":5355")
-	if err != nil {
-		return err
-	}
-	defer allTCP.Close()
 	// procd guarantees one instance. Refuse to remove any non-socket path.
 	if st, e := os.Lstat(SocketPath); e == nil {
 		if st.Mode()&os.ModeSocket == 0 {
@@ -533,39 +602,32 @@ func Serve(ctx context.Context) error {
 			s.lastError = warning
 		}
 	}
-	errCh := make(chan error, 6)
-	udpServer := &dns.Server{PacketConn: udp, Handler: dns.HandlerFunc(s.dns), MaxTCPQueries: 32}
-	tcpServer := &dns.Server{Listener: dnsTCP, Handler: dns.HandlerFunc(s.dns), IdleTimeout: func() time.Duration { return 15 * time.Second }, MaxTCPQueries: 32}
-	allHandler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) { s.dnsMode("all", w, req) })
-	allUDPServer := &dns.Server{PacketConn: allUDP, Handler: allHandler, MaxTCPQueries: 32}
-	allTCPServer := &dns.Server{Listener: allTCP, Handler: allHandler, IdleTimeout: func() time.Duration { return 15 * time.Second }, MaxTCPQueries: 32}
-	go func() { errCh <- udpServer.ActivateAndServe() }()
-	go func() { errCh <- tcpServer.ActivateAndServe() }()
-	go func() { errCh <- allUDPServer.ActivateAndServe() }()
-	go func() { errCh <- allTCPServer.ActivateAndServe() }()
+	errCh := make(chan error, len(dnsServers)+len(proxies)+1)
+	for _, server := range dnsServers {
+		go func() { errCh <- server.ActivateAndServe() }()
+		defer server.Shutdown()
+	}
 	api := &http.Server{Handler: http.HandlerFunc(s.api), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 60 * time.Second}
 	go func() { errCh <- api.Serve(control) }()
-	go func() {
-		for {
-			conn, e := tcp.AcceptTCP()
-			if e != nil {
-				errCh <- e
-				return
+	for _, proxy := range proxies {
+		go func() {
+			for {
+				conn, e := proxy.listener.AcceptTCP()
+				if e != nil {
+					errCh <- e
+					return
+				}
+				select {
+				case s.limit <- struct{}{}:
+					go s.handleTCP(conn, proxy.mode)
+				default:
+					conn.Close()
+				}
 			}
-			select {
-			case s.limit <- struct{}{}:
-				go s.handleTCP(conn)
-			default:
-				conn.Close()
-			}
-		}
-	}()
+		}()
+	}
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-	defer udpServer.Shutdown()
-	defer tcpServer.Shutdown()
-	defer allUDPServer.Shutdown()
-	defer allTCPServer.Shutdown()
 	defer api.Close()
 	for {
 		select {

@@ -2,6 +2,7 @@ package nintendoguard
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -34,20 +35,62 @@ var UpdateDomains = []string{
 	"sun.hac.lp1.d4c.nintendo.net", "atumn.hac.lp1.d4c.nintendo.net", "aqua.hac.lp1.d4c.nintendo.net",
 }
 
+// Domain facts checked against 90DNS commit 4d477d7181188690203aae5f4e56e287edd21734.
+// See docs/nintendo-services.md for sources and the deliberately narrower scope.
+//
+//go:embed nintendo-domains.txt
+var nintendoDomainText string
+
+var NintendoDomains = strings.Fields(nintendoDomainText)
+var ConnectionTestDomains = []string{"conntest.nintendowifi.net", "ctest.cdn.nintendo.net"}
+
+type policyListener struct {
+	mode             string
+	dnsPort, tcpPort int
+}
+
+var policyListeners = []policyListener{{"updates", 5354, 5443}, {"nintendo", 5356, 5444}, {"all", 5355, 0}}
+
+func validMode(mode string) bool {
+	return mode == "off" || mode == "updates" || mode == "nintendo" || mode == "all"
+}
+
+func guardDNSPort(port int) bool {
+	for _, listener := range policyListeners {
+		if port == listener.dnsPort {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+}
+
+func connectionTest(host string) bool {
+	for _, domain := range ConnectionTestDomains {
+		if normalizeHost(host) == domain {
+			return true
+		}
+	}
+	return false
+}
+
 func (c Config) Validate() (Config, error) {
 	if c.Upstream == "" {
 		c.Upstream = "127.0.0.1:53"
 	}
 	host, port, err := net.SplitHostPort(c.Upstream)
 	n, portErr := strconv.Atoi(port)
-	if err != nil || portErr != nil || net.ParseIP(host) == nil || n < 1 || n > 65535 || n == 5354 || n == 5355 {
-		return c, fmt.Errorf("upstream must be an IP:port DNS server, not guard ports 5354/5355")
+	if err != nil || portErr != nil || net.ParseIP(host) == nil || n < 1 || n > 65535 || guardDNSPort(n) {
+		return c, fmt.Errorf("upstream must be an IP:port DNS server, not guard ports 5354/5355/5356")
 	}
 	if c.Devices != nil && (c.Mode != "" || c.MAC != "") {
 		return c, fmt.Errorf("use devices or legacy mode/mac, not both")
 	}
 	if c.Devices == nil {
-		if c.Mode != "off" && c.Mode != "updates" && c.Mode != "all" {
+		if !validMode(c.Mode) {
 			return c, fmt.Errorf("devices list is required")
 		}
 		c.Devices = []Device{}
@@ -62,8 +105,8 @@ func (c Config) Validate() (Config, error) {
 	devices := make([]Device, len(c.Devices))
 	seen := make(map[string]bool)
 	for i, d := range c.Devices {
-		if d.Mode != "off" && d.Mode != "updates" && d.Mode != "all" {
-			return c, fmt.Errorf("device %d: mode must be off, updates or all", i+1)
+		if !validMode(d.Mode) {
+			return c, fmt.Errorf("device %d: mode must be off, updates, nintendo or all", i+1)
 		}
 		m, err := net.ParseMAC(strings.TrimSpace(d.MAC))
 		if err != nil || len(m) != 6 || m[0]&1 != 0 || m.String() == "00:00:00:00:00:00" {
@@ -85,11 +128,16 @@ func (c Config) Validate() (Config, error) {
 }
 
 func (d Device) Blocks(host string) bool {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	host = normalizeHost(host)
 	var domains []string
 	switch d.Mode {
 	case "updates":
 		domains = UpdateDomains
+	case "nintendo":
+		if connectionTest(host) {
+			return false
+		}
+		domains = NintendoDomains
 	case "all":
 		// Full protection deliberately isolates this device from routed internet,
 		// including cached IPs and non-HTTP game traffic, instead of guessing all
@@ -116,7 +164,7 @@ func (c Config) Fingerprint() string {
 	sort.Strings(policies)
 	b, _ := json.Marshal(policies)
 	s := sha256.Sum256(b)
-	return "nintendo-control-v4-" + hex.EncodeToString(s[:8])
+	return "nintendo-control-v5-" + hex.EncodeToString(s[:8])
 }
 
 func (c Config) HasMode(mode string) bool {
@@ -128,7 +176,9 @@ func (c Config) HasMode(mode string) bool {
 	return false
 }
 
-func (c Config) Active() bool { return c.HasMode("updates") || c.HasMode("all") }
+func (c Config) Active() bool {
+	return c.HasMode("updates") || c.HasMode("nintendo") || c.HasMode("all")
+}
 
 // A dedicated table survives normal fw4 reloads. The firewall include and the
 // daemon watchdog recreate it if another tool flushes the complete ruleset.
@@ -137,31 +187,37 @@ func (c Config) Rules() string {
 		return "add table inet nintendo_control\ndelete table inet nintendo_control\n"
 	}
 	var nat, forward, input strings.Builder
-	var updates, all []string
+	macs := make(map[string][]string)
 	for _, d := range c.Devices {
-		switch d.Mode {
-		case "updates":
-			updates = append(updates, d.MAC)
-			fmt.Fprintf(&nat, "  ether saddr %s meta nfproto ipv4 meta l4proto { tcp, udp } th dport 53 counter redirect to :5354\n", d.MAC)
-			fmt.Fprintf(&nat, "  ether saddr %s meta nfproto ipv4 tcp dport { 80, 443 } counter redirect to :5443\n", d.MAC)
+		if d.Mode == "off" {
+			continue
+		}
+		var listener policyListener
+		for _, candidate := range policyListeners {
+			if candidate.mode == d.Mode {
+				listener = candidate
+			}
+		}
+		macs[d.Mode] = append(macs[d.Mode], d.MAC)
+		fmt.Fprintf(&nat, "  ether saddr %s meta nfproto ipv4 meta l4proto { tcp, udp } th dport 53 counter redirect to :%d\n", d.MAC, listener.dnsPort)
+		if listener.tcpPort != 0 {
+			fmt.Fprintf(&nat, "  ether saddr %s meta nfproto ipv4 tcp dport { 80, 443 } counter redirect to :%d\n", d.MAC, listener.tcpPort)
 			fmt.Fprintf(&forward, "  ether saddr %s meta nfproto ipv6 counter reject\n  ether saddr %s tcp dport 853 counter reject with tcp reset\n  ether saddr %s udp dport { 443, 853 } counter reject\n", d.MAC, d.MAC, d.MAC)
-		case "all":
-			all = append(all, d.MAC)
-			// A separate DNS listener keeps simultaneous modes independent of IP leases.
-			fmt.Fprintf(&nat, "  ether saddr %s meta nfproto ipv4 meta l4proto { tcp, udp } th dport 53 counter redirect to :5355\n", d.MAC)
+		} else {
 			fmt.Fprintf(&forward, "  ether saddr %s counter reject\n", d.MAC)
 			fmt.Fprintf(&input, "  ether saddr %s meta l4proto { tcp, udp } th dport != { 53, 67, 5355 } counter reject\n", d.MAC)
 		}
 	}
-	for _, listener := range []struct {
-		macs  []string
-		ports string
-	}{{updates, "{ 5354, 5443 }"}, {all, "5355"}} {
+	for _, listener := range policyListeners {
 		match := ""
-		if len(listener.macs) > 0 {
-			match = "ether saddr != { " + strings.Join(listener.macs, ", ") + " } "
+		if len(macs[listener.mode]) > 0 {
+			match = "ether saddr != { " + strings.Join(macs[listener.mode], ", ") + " } "
 		}
-		fmt.Fprintf(&input, "  iifname != \"lo\" %smeta l4proto { tcp, udp } th dport %s counter reject\n", match, listener.ports)
+		ports := strconv.Itoa(listener.dnsPort)
+		if listener.tcpPort != 0 {
+			ports = fmt.Sprintf("{ %d, %d }", listener.dnsPort, listener.tcpPort)
+		}
+		fmt.Fprintf(&input, "  iifname != \"lo\" %smeta l4proto { tcp, udp } th dport %s counter reject\n", match, ports)
 	}
 	return fmt.Sprintf(`add table inet nintendo_control
 delete table inet nintendo_control

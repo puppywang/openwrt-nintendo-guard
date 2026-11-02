@@ -13,7 +13,7 @@ func TestPortableConfig(t *testing.T) {
 	if err != nil || c.Upstream != "127.0.0.1:53" {
 		t.Fatal(c, err)
 	}
-	for _, value := range []string{"localhost:53", "127.0.0.1:5354", "127.0.0.1:5355", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:53; reboot"} {
+	for _, value := range []string{"localhost:53", "127.0.0.1:5354", "127.0.0.1:5355", "127.0.0.1:5356", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:53; reboot"} {
 		if _, err := (Config{Mode: "off", Upstream: value}).Validate(); err == nil {
 			t.Errorf("accepted %q", value)
 		}
@@ -60,6 +60,9 @@ func TestUpstreamTCPFallback(t *testing.T) {
 		r := new(dns.Msg)
 		r.SetReply(q)
 		rr, _ := dns.NewRR(q.Question[0].Name + " 60 IN A 192.0.2.123")
+		if q.Question[0].Name == "alias.example.org." {
+			rr, _ = dns.NewRR("alias.example.org. 60 IN CNAME accounts.nintendo.com.")
+		}
 		r.Answer = []dns.RR{rr}
 		w.WriteMsg(r)
 	})}
@@ -74,12 +77,22 @@ func TestUpstreamTCPFallback(t *testing.T) {
 			t.Fatal("DNS test server not ready")
 		}
 	}
-	s := &Service{config: Config{Devices: []Device{{Mode: "updates"}, {Mode: "all"}}, Upstream: tcp.Addr().String()}}
+	s := &Service{config: Config{Devices: []Device{{Mode: "updates"}, {Mode: "nintendo"}, {Mode: "all"}}, Upstream: tcp.Addr().String()}}
 	q := new(dns.Msg)
 	q.SetQuestion("atum.p01.lp1.d4c.srv.nintendo.net.", dns.TypeA)
 	w := new(response)
 	s.dns(w, q)
 	if w.msg == nil || w.msg.Truncated || w.msg.Id != q.Id || len(w.msg.Answer) != 1 {
 		t.Fatal("upstream TCP fallback failed", w.msg)
+	}
+	q.SetQuestion("home.example.org.", dns.TypeA)
+	s.dnsMode("nintendo", w, q)
+	if len(w.msg.Answer) != 1 || !w.msg.Answer[0].(*dns.A).A.Equal(net.ParseIP("192.0.2.123")) {
+		t.Fatal("unrelated DNS blocked", w.msg)
+	}
+	q.SetQuestion("alias.example.org.", dns.TypeA)
+	s.dnsMode("nintendo", w, q)
+	if len(w.msg.Answer) != 1 || !w.msg.Answer[0].(*dns.A).A.Equal(net.IPv4zero) {
+		t.Fatal("CNAME bypassed blocking", w.msg)
 	}
 }

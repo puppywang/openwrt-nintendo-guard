@@ -16,6 +16,7 @@ import time
 SELF = str(Path(__file__).resolve())
 UPDATE = "sun.p01.lp1.d4c.srv.nintendo.net"
 GAME = "atum.p01.lp1.d4c.srv.nintendo.net"
+HOME = "home.example.org"
 MAC = "02:aa:bb:cc:dd:01"
 
 
@@ -45,7 +46,21 @@ def client(kind, host, destination, port="53"):
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                     sock.settimeout(2); sock.sendto(q, (destination, int(port)))
                     reply = sock.recv(4096)
-            return {"rcode": reply[3] & 15}
+            def skip_name(offset):
+                while reply[offset]:
+                    length = reply[offset]
+                    if length & 0xc0 == 0xc0: return offset+2
+                    offset += length+1
+                return offset+1
+            offset=12
+            for _ in range(struct.unpack("!H",reply[4:6])[0]): offset=skip_name(offset)+4
+            addresses=[]
+            for _ in range(struct.unpack("!H",reply[6:8])[0]):
+                offset=skip_name(offset)
+                rrtype,_,_,size=struct.unpack("!HHIH",reply[offset:offset+10]);offset+=10
+                if rrtype==1 and size==4: addresses.append(socket.inet_ntoa(reply[offset:offset+size]))
+                offset+=size
+            return {"rcode": reply[3] & 15,"addresses":addresses}
         if kind == "udp":
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.settimeout(2); sock.sendto(b"ping", (destination, 9999))
@@ -54,7 +69,12 @@ def client(kind, host, destination, port="53"):
             sock = ssl._create_unverified_context().wrap_socket(raw, server_hostname=host) if kind == "tls" else raw
             with sock:
                 sock.sendall(("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n").encode())
-                return {"ok": b"200" in sock.recv(2048)}
+                reply=b""
+                while len(reply)<16384:
+                    chunk=sock.recv(2048)
+                    if not chunk: break
+                    reply+=chunk
+                return {"ok": b"200" in reply,"local_test":b"X-Organization: Nintendo" in reply,"body":reply.split(b"\r\n\r\n",1)[-1].decode("utf-8","replace")}
     except (OSError, ssl.SSLError) as error:
         return {"ok": False, "error": type(error).__name__}
 
@@ -122,6 +142,7 @@ def main(binary):
             target = network("t", "192.0.2", MAC)
             other = network("c", "203.0.113", "02:aa:bb:cc:dd:02")
             free = network("f", "198.18.0", "02:aa:bb:cc:dd:04")
+            restricted = network("n", "192.0.3", "02:aa:bb:cc:dd:05")
             server = network("s", "198.51.100", "02:aa:bb:cc:dd:03")
             cert, key = work+"/cert.pem", work+"/key.pem"
             command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=test.invalid")
@@ -205,6 +226,7 @@ def main(binary):
                 {"name":"Switch 2", "mac":MAC, "mode":"updates"},
                 {"name":"Switch", "mac":"02:aa:bb:cc:dd:02", "mode":"all"},
                 {"name":"Disabled", "mac":"02:aa:bb:cc:dd:04", "mode":"off"},
+                {"name":"Nintendo only", "mac":"02:aa:bb:cc:dd:05", "mode":"nintendo"},
             ]}
             def save():
                 status = json.loads(command(binary,"set",input=json.dumps(config),env=env).stdout)
@@ -219,13 +241,28 @@ def main(binary):
                 assert "rcode" not in query(other,kind,GAME,"203.0.113.1","5354")
                 assert "rcode" not in query(target,kind,GAME,"192.0.2.1","5355")
                 assert "rcode" not in query(free,kind,GAME,"198.18.0.1","5354")
+                blocked=query(restricted,kind,GAME,"192.0.3.1")
+                assert blocked["rcode"]==0 and blocked["addresses"]==["0.0.0.0"],blocked
+                assert query(restricted,kind,HOME,"192.0.3.1")["addresses"]==["198.51.100.2"]
+                assert "rcode" not in query(restricted,kind,HOME,"192.0.3.1","5354")
+                assert "rcode" not in query(target,kind,HOME,"192.0.2.1","5356")
+                test=query(restricted,kind,"ctest.cdn.nintendo.net","192.0.3.1")
+                assert test["addresses"]==["192.0.3.1"],test
             assert query(target,"tls")["ok"]
             assert not query(target,"tls",UPDATE)["ok"]
             assert not query(other,"tls")["ok"]
             assert not query(other,"udp")["ok"]
             assert query(free,"tls",UPDATE)["ok"]
             assert query(free,"udp")["ok"]
-            print("PASS mixed updates/all/off: independent DNS/TCP/UDP and listener access", flush=True)
+            for kind in ("tls","http"):
+                assert query(restricted,kind,HOME)["ok"]
+                assert not query(restricted,kind,GAME)["ok"] # cached IP, no DNS
+                assert not query(restricted,kind,"nega-lp1-upload.s3.us-east-1.amazonaws.com")["ok"]
+            assert query(restricted,"udp")["ok"]
+            for host in ("conntest.nintendowifi.net","ctest.cdn.nintendo.net"):
+                test=query(restricted,"http",host,"192.0.3.1")
+                assert test["ok"] and test["local_test"],test
+            print("PASS four modes: selective Nintendo blocking, unrelated DNS/TLS/HTTP/UDP, local connection test, listener isolation", flush=True)
             # Invalid saves must leave every device's existing policy in place.
             invalid = dict(config,devices=config["devices"]+[config["devices"][0]])
             result = subprocess.run([binary,"set"],input=json.dumps(invalid),env=env,capture_output=True,text=True,timeout=10)
@@ -244,6 +281,8 @@ def main(binary):
             print("PASS invalid save, device removal and changed client IP", flush=True)
             stop(guard); guard = start()
             assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
+            assert query(restricted,"dns",GAME,"192.0.3.1")["addresses"]==["0.0.0.0"]
+            assert query(restricted,"tls",HOME)["ok"]
             command("nft","delete","table","inet","nintendo_control")
             restored = False
             for _ in range(65):
@@ -255,6 +294,7 @@ def main(binary):
             config["devices"] = []; save()
             assert query(target,"tls",UPDATE)["ok"]
             assert query(other,"tls",UPDATE)["ok"]
+            assert query(restricted,"tls",GAME)["ok"]
             print("PASS empty list restores normal networking", flush=True)
         finally:
             for proc in reversed(processes): stop(proc)

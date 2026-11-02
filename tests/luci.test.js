@@ -50,6 +50,9 @@ async function main() {
     const button = text => descendants(root,n => n.tag === 'button' && n.children[0] === text)[0];
     const rows = () => descendants(root,n => n.tag === 'tr' && n.children[0]?.children?.[0]?.tag === 'input');
     assert.equal(rows().length,3);
+    const choices = controls('拦截等级')[0].children;
+    assert.equal(choices.find(n=>n.value==='all').children[0],'禁止该设备全部外网');
+    assert.match(choices.find(n=>n.value==='nintendo').children[0],/保留其他网络/);
     controls('设备名称')[0].value = 'Edited';
     await poll();
     assert.equal(controls('设备名称')[0].value,'Edited','poll overwrote unsaved edits');
@@ -65,10 +68,10 @@ async function main() {
     await button('保存并立即应用').attrs.click();
     assert.equal(submitted.length,1,'multicast MAC reached backend');
     controls('设备 MAC 地址')[3].value = '02:aa:bb:cc:dd:04';
-    controls('拦截等级')[3].value = 'all';
+    controls('拦截等级')[3].value = 'nintendo';
     await button('保存并立即应用').attrs.click();
     assert.equal(submitted[1].devices.length,4);
-    assert.equal(submitted[1].devices[3].mode,'all');
+    assert.equal(submitted[1].devices[3].mode,'nintendo');
     while (rows().length) descendants(root,n=>n.tag==='button' && n.children[0]==='移除')[0].attrs.click();
     await button('保存并立即应用').attrs.click();
     assert.deepEqual(submitted[2].devices,[],'empty list was not saved');

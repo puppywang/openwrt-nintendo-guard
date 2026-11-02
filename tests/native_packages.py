@@ -75,6 +75,7 @@ def main():
         config.write_text(json.dumps({"devices":[
             {"name":"Switch 2","mac":"02:aa:bb:cc:dd:01","mode":"updates"},
             {"name":"Switch","mac":"02:aa:bb:cc:dd:02","mode":"all"},
+            {"name":"Nintendo only","mac":"02:aa:bb:cc:dd:03","mode":"nintendo"},
         ],"upstream":"127.0.0.1:53"})+"\n")
         saved=config.read_bytes();lifecycle("configure");assert config.read_bytes()==saved
         replacement=Path(work)/"backend-r2.apk"

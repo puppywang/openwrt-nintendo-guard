@@ -6,7 +6,7 @@
 
 var getStatus = rpc.declare({ object: 'nintendo-control', method: 'status', nobatch: true, expect: { '': {} } });
 var setConfig = rpc.declare({ object: 'nintendo-control', method: 'set', nobatch: true, params: [ 'devices', 'upstream' ], expect: { '': {} } });
-var labels = { off: '关闭拦截', updates: '只拦截系统更新', all: '拦截全部任天堂服务' };
+var labels = { off: '关闭拦截', updates: '只拦截系统更新', nintendo: '只拦截任天堂服务（保留其他网络）', all: '禁止该设备全部外网' };
 
 return view.extend({
 	load: function() { return getStatus(); },
@@ -14,7 +14,7 @@ return view.extend({
 		var config = data.config || {}, rows = [], limit = data.max_devices || 64;
 		var upstream = E('input', { 'class': 'cbi-input-text', value: config.upstream || '127.0.0.1:53', 'aria-label': '上游 DNS' });
 		var state = E('div', { 'style': 'padding:1em;border:1px solid #aaa;border-radius:6px;margin:1em 0;' });
-		var counters = E('p'), recent = E('div'), domainList = E('div');
+		var counters = E('p'), recent = E('div'), domainList = E('div'), nintendoList = E('div');
 		var deviceTable = E('table', { 'class': 'table' });
 		var button, addButton, saving = false;
 		var renderRows = function() {
@@ -57,6 +57,8 @@ return view.extend({
 				E('tr', { 'class': 'tr table-titles' }, [ E('th', {}, '时间'), E('th', {}, '设备 / 来源'), E('th', {}, '类型'), E('th', {}, '域名') ])
 			].concat(events.map(function(e) { return E('tr', { 'class': 'tr' }, [ E('td', {}, new Date(e.time).toLocaleString()), E('td', {}, (names[e.mac] ? names[e.mac] + ' · ' : '') + (e.client || '')), E('td', {}, e.protocol), E('td', { 'style': 'word-break:break-all' }, e.host) ]); }))) : E('p', {}, '暂无拦截记录。无需在主机上主动检查更新来测试。'));
 			domainList.replaceChildren(E('ul', {}, (s.update_domains || []).map(function(d) { return E('li', {}, E('code', {}, d)); })));
+			nintendoList.replaceChildren(E('p', {}, '按完整域名和子域名匹配。联网检测由路由器本地响应：' + (s.connection_test_domains || []).join(', ')),
+				E('ul', {}, (s.nintendo_domains || []).map(function(d) { return E('li', {}, E('code', {}, d)); })));
 		};
 		var setBusy = function(busy) {
 			saving = busy; button.disabled = busy; addButton.disabled = busy || rows.length >= limit; upstream.disabled = busy;
@@ -94,17 +96,19 @@ return view.extend({
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', { 'style': 'overflow-x:auto' }, deviceTable), addButton,
 				E('p', {}, '添加、移除或切换等级后请保存。移除设备会解除其拦截；只重建策略发生变化的设备连接。'),
-				E('div', { 'class': 'cbi-value' }, [ E('label', { 'class': 'cbi-value-title' }, '上游 DNS'), E('div', { 'class': 'cbi-value-field' }, [ upstream, E('div', { 'class': 'cbi-value-description' }, '全部设备共用。通常保持 127.0.0.1:53；不能指向本程序的 5354 / 5355 端口。') ]) ]),
+				E('div', { 'class': 'cbi-value' }, [ E('label', { 'class': 'cbi-value-title' }, '上游 DNS'), E('div', { 'class': 'cbi-value-field' }, [ upstream, E('div', { 'class': 'cbi-value-description' }, '全部设备共用。通常保持 127.0.0.1:53；不能指向本程序的 5354 / 5355 / 5356 端口。') ]) ]),
 				button
 			]),
 			E('ul', {}, [
 				E('li', {}, [ E('strong', {}, '只拦截系统更新：'), '拦截已知更新检查、固件下载和最低系统版本查询（sun / atumn / aqua），保留游戏 CDN（atum）。部分游戏或 DLC 的版本检查仍可能报错。' ]),
-				E('li', {}, [ E('strong', {}, '拦截全部任天堂服务（断开外网）：'), '禁止该设备经路由器访问互联网及其他网段。商店、下载、云存档以及第三方游戏联网都会停止；同一局域网内的设备直连不受此转发规则影响。' ]),
+				E('li', {}, [ E('strong', {}, '只拦截任天堂服务：'), '参考 90DNS 的任天堂域名与专用上传端点，拦截商店、联机、更新和遥测。其他域名、普通 TCP/UDP 流量保留；联网检测由路由器本地响应。无需使用公共 90DNS。' ]),
+				E('li', {}, [ E('strong', {}, '禁止该设备全部外网：'), '禁止该设备经路由器访问互联网及其他网段，所有域名和第三方游戏联网都会停止；同一局域网内的设备直连不受此转发规则影响。旧版 all 模式保留这一行为。' ]),
 				E('li', {}, '启用时会阻止该设备的 IPv6 转发、QUIC 和加密 DNS 专用端口，拒绝无法识别域名的 HTTPS/HTTP 连接。'),
 				E('li', {}, '第一档按已知域名拦截，未来新增域名可能需要补充。两档均无法控制主机已下载的固件、卡带更新或改连其他网络。')
 			]),
 			E('h3', {}, '最近拦截'), counters, recent,
-			E('details', {}, [ E('summary', {}, '系统更新域名清单'), domainList ])
+			E('details', {}, [ E('summary', {}, '系统更新域名清单'), domainList ]),
+			E('details', {}, [ E('summary', {}, '任天堂服务域名清单（参考 90DNS）'), nintendoList ])
 		]);
 	},
 	handleSaveApply: null,
