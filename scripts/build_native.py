@@ -30,7 +30,7 @@ def payload(binary=None, package="nintendo-guard"):
             "etc/init.d/nintendo-control": source("luci/nintendo-control.init", 0o755),
             "usr/libexec/nintendo-control-firewall": source("luci/nintendo-control-firewall", 0o755),
             "usr/libexec/nintendo-control-package": source("packaging/lifecycle.sh", 0o755),
-            "usr/share/nintendo-guard/default.json": (b'{"mode":"off","mac":"","upstream":"127.0.0.1:53"}\n', 0o644),
+            "usr/share/nintendo-guard/default.json": (b'{"devices":[],"upstream":"127.0.0.1:53"}\n', 0o644),
             "lib/upgrade/keep.d/nintendo-guard": (b"/etc/nintendo-control.json\n", 0o644),
             "etc/uci-defaults/95-nintendo-control": (b'#!/bin/sh\n/usr/libexec/nintendo-control-package configure\n', 0o755),
             "usr/share/licenses/nintendo-guard/LICENSE": source("LICENSE"),

@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,11 +36,12 @@ type Event struct {
 	Protocol string `json:"protocol"`
 	Host     string `json:"host"`
 	Client   string `json:"client"`
+	MAC      string `json:"mac,omitempty"`
 }
 
 type flow struct {
-	host string
 	conn *net.TCPConn
+	mac  string
 }
 
 type Service struct {
@@ -66,7 +69,11 @@ func ReadConfig() (Config, error) {
 }
 
 func runInput(input string, command string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	return runInputContext(context.Background(), input, command, args...)
+}
+
+func runInputContext(parent context.Context, input string, command string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, 6*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, command, args...)
 	if input != "" {
@@ -90,7 +97,7 @@ func ApplyFirewall(c Config) error {
 
 func firewallOK(c Config) bool {
 	b, err := runInput("", "nft", "list", "table", "inet", "nintendo_control")
-	if c.Mode == "off" {
+	if !c.Active() {
 		return err != nil && strings.Contains(string(b), "No such file")
 	}
 	return err == nil && strings.Contains(string(b), c.Fingerprint())
@@ -99,6 +106,7 @@ func firewallOK(c Config) bool {
 func (s *Service) current() Config { s.mu.RLock(); defer s.mu.RUnlock(); return s.config }
 
 func (s *Service) blocked(proto, host, client string) {
+	mac := clientMAC(client)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if proto == "DNS" {
@@ -106,26 +114,24 @@ func (s *Service) blocked(proto, host, client string) {
 	} else {
 		s.tlsBlocked++
 	}
-	s.events = append(s.events, Event{time.Now().Format(time.RFC3339), proto, host, client})
+	s.events = append(s.events, Event{time.Now().Format(time.RFC3339), proto, host, client, mac})
 	if len(s.events) > 32 {
 		s.events = s.events[len(s.events)-32:]
 	}
 }
 
-func deviceIPs(mac string) []string {
-	if mac == "" {
-		return []string{}
-	}
-	seen := make(map[string]bool)
+// Listener selection and firewall policy never rely on this display inventory.
+func deviceAddresses() map[string][]string {
+	owners := make(map[string]string)
 	b, _ := os.ReadFile("/tmp/dhcp.leases")
 	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
-		if len(f) >= 3 && strings.EqualFold(f[1], mac) && net.ParseIP(f[2]).To4() != nil {
+		if len(f) >= 3 && net.ParseIP(f[2]).To4() != nil {
 			expires, _ := strconv.ParseInt(f[0], 10, 64)
 			if expires != 0 && expires < time.Now().Unix() {
 				continue
 			}
-			seen[f[2]] = true
+			owners[f[2]] = strings.ToLower(f[1])
 		}
 	}
 	b, _ = runInput("", "ip", "neigh", "show")
@@ -133,29 +139,45 @@ func deviceIPs(mac string) []string {
 		f := strings.Fields(line)
 		for i := 1; i+1 < len(f); i++ {
 			if f[i] == "lladdr" && net.ParseIP(f[0]) != nil {
-				if strings.EqualFold(f[i+1], mac) {
-					seen[f[0]] = true
-				} else {
-					delete(seen, f[0])
-				}
+				owners[f[0]] = strings.ToLower(f[i+1])
 			}
 		}
 	}
-	var result []string
-	for ip := range seen {
-		result = append(result, ip)
+	result := make(map[string][]string)
+	for ip, mac := range owners {
+		result[mac] = append(result[mac], ip)
+	}
+	for _, ips := range result {
+		sort.Strings(ips)
 	}
 	return result
 }
 
+func clientMAC(client string) string {
+	ip, _, err := net.SplitHostPort(client)
+	if err != nil {
+		return ""
+	}
+	b, _ := os.ReadFile("/proc/net/arp")
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 4 && f[0] == ip && f[2] != "0x0" {
+			return strings.ToLower(f[3])
+		}
+	}
+	return ""
+}
+
 // Only invalidate this device's DNS/HTTP connections. Other clients and the
 // router's existing acceleration service are never restarted.
-func reconnect(mac string, all bool) string {
+func reconnect(ctx context.Context, ips []string, all bool) string {
 	if _, err := exec.LookPath("conntrack"); err != nil {
 		return "conntrack unavailable: reconnect the Switch Wi-Fi to clear existing connections"
 	}
-	ips := deviceIPs(mac)
 	for _, ip := range ips {
+		if ctx.Err() != nil {
+			return "connection cleanup timed out: reconnect changed devices' Wi-Fi"
+		}
 		family := "ipv4"
 		if net.ParseIP(ip).To4() == nil {
 			family = "ipv6"
@@ -163,17 +185,57 @@ func reconnect(mac string, all bool) string {
 		if all || family == "ipv6" {
 			// Retire existing flows, including fw4 software/hardware flow offload,
 			// when entering full isolation. This remains scoped to the target IP.
-			_, _ = runInput("", "conntrack", "-D", "-f", family, "-s", ip)
-			_, _ = runInput("", "conntrack", "-D", "-f", family, "-d", ip)
+			_, _ = runInputContext(ctx, "", "conntrack", "-D", "-f", family, "-s", ip)
+			_, _ = runInputContext(ctx, "", "conntrack", "-D", "-f", family, "-d", ip)
 			continue
 		}
 		for _, proto := range []string{"tcp", "udp"} {
 			for _, port := range []string{"53", "80", "443", "853"} {
-				_, _ = runInput("", "conntrack", "-D", "-f", "ipv4", "-s", ip, "-p", proto, "--dport", port)
+				_, _ = runInputContext(ctx, "", "conntrack", "-D", "-f", "ipv4", "-s", ip, "-p", proto, "--dport", port)
 			}
 		}
 	}
+	if ctx.Err() != nil {
+		return "connection cleanup timed out: reconnect changed devices' Wi-Fi"
+	}
 	return ""
+}
+
+func changedDevices(old, c Config) map[string]bool {
+	before, after := make(map[string]string), make(map[string]string)
+	for _, d := range old.Devices {
+		before[d.MAC] = d.Mode
+	}
+	for _, d := range c.Devices {
+		after[d.MAC] = d.Mode
+	}
+	changed := make(map[string]bool)
+	for mac, mode := range before {
+		if mode != after[mac] && (mode != "off" || (after[mac] != "" && after[mac] != "off")) {
+			changed[mac] = mode == "all" || after[mac] == "all"
+		}
+	}
+	for mac, mode := range after {
+		if mode != before[mac] && mode != "off" {
+			changed[mac] = mode == "all" || before[mac] == "all"
+		}
+	}
+	return changed
+}
+
+func reconnectChanged(changed map[string]bool, addresses map[string][]string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	warning := ""
+	for mac, full := range changed {
+		if w := reconnect(ctx, addresses[mac], full); w != "" {
+			warning = w
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return warning
 }
 
 // Cleanup is for uninstall after procd has stopped the daemon.
@@ -182,12 +244,11 @@ func Cleanup() error {
 	if err != nil {
 		return err
 	}
-	full := c.Mode == "all"
-	c.Mode = "off"
-	if err = ApplyFirewall(c); err != nil {
+	off := Config{Devices: []Device{}, Upstream: c.Upstream}
+	if err = ApplyFirewall(off); err != nil {
 		return err
 	}
-	if warning := reconnect(c.MAC, full); warning != "" {
+	if warning := reconnectChanged(changedDevices(c, off), deviceAddresses()); warning != "" {
 		return fmt.Errorf("%s", warning)
 	}
 	return nil
@@ -201,7 +262,7 @@ func (s *Service) set(c Config) error {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	old := s.current()
-	if old == c && firewallOK(c) {
+	if old.Upstream == c.Upstream && slices.Equal(old.Devices, c.Devices) && firewallOK(c) {
 		return nil
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
@@ -240,22 +301,24 @@ func (s *Service) set(c Config) error {
 		rollbackErr := ApplyFirewall(old)
 		return fmt.Errorf("save failed: %v; firewall rollback: %v", err, rollbackErr)
 	}
+	changed := changedDevices(old, c)
+	addresses := map[string][]string{}
+	if len(changed) > 0 {
+		addresses = deviceAddresses()
+	}
 	s.mu.Lock()
 	for _, f := range s.flows {
-		if c.Blocks(f.host) || old.MAC != c.MAC {
+		_, affected := changed[f.mac]
+		ip, _, _ := net.SplitHostPort(f.conn.RemoteAddr().String())
+		for mac := range changed {
+			affected = affected || slices.Contains(addresses[mac], ip)
+		}
+		if affected {
 			f.conn.Close()
 		}
 	}
 	s.mu.Unlock()
-	warning := ""
-	if old.Mode != c.Mode || old.MAC != c.MAC {
-		warning = reconnect(c.MAC, old.Mode == "all" || c.Mode == "all")
-	}
-	if old.MAC != c.MAC {
-		if oldWarning := reconnect(old.MAC, old.Mode == "all"); oldWarning != "" {
-			warning = oldWarning
-		}
-	}
+	warning := reconnectChanged(changed, addresses)
 	s.mu.Lock()
 	s.lastError = warning
 	s.mu.Unlock()
@@ -274,21 +337,35 @@ func (s *Service) status() map[string]any {
 		"update_domains": UpdateDomains,
 	}
 	s.mu.RUnlock()
-	r["device_ips"] = deviceIPs(c.MAC)
+	addresses := deviceAddresses()
+	devices := make([]map[string]any, 0, len(c.Devices))
+	for _, d := range c.Devices {
+		ips := addresses[d.MAC]
+		if ips == nil {
+			ips = []string{}
+		}
+		devices = append(devices, map[string]any{"name": d.Name, "mac": d.MAC, "mode": d.Mode, "ips": ips})
+	}
+	r["devices"] = devices
+	r["max_devices"] = MaxDevices
 	return r
 }
 
 func (s *Service) dns(w dns.ResponseWriter, req *dns.Msg) {
+	s.dnsMode("updates", w, req)
+}
+
+func (s *Service) dnsMode(mode string, w dns.ResponseWriter, req *dns.Msg) {
 	c := s.current()
 	// With no redirection installed, the listener must not become an open resolver.
-	if c.Mode == "off" {
+	if !c.HasMode(mode) {
 		resp := new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeRefused)
 		w.WriteMsg(resp)
 		return
 	}
 	for _, q := range req.Question {
-		if c.Blocks(q.Name) {
+		if (Device{Mode: mode}).Blocks(q.Name) {
 			s.blocked("DNS", strings.TrimSuffix(q.Name, "."), w.RemoteAddr().String())
 			resp := new(dns.Msg)
 			resp.SetRcode(req, dns.RcodeNameError)
@@ -328,13 +405,22 @@ func (s *Service) handleTCP(c *net.TCPConn) {
 		s.blocked("UNREADABLE", "无法识别域名的连接", c.RemoteAddr().String())
 		return
 	}
+	mac := clientMAC(c.RemoteAddr().String())
 	s.mu.Lock()
-	if s.config.Blocks(host) {
+	// Only update-mode MACs can reach this listener through the firewall.
+	// Check the current device too when a policy changed during ClientHello.
+	mode := "off"
+	for _, d := range s.config.Devices {
+		if d.MAC == mac {
+			mode = d.Mode
+		}
+	}
+	if !s.config.HasMode("updates") || mode == "all" || (Device{Mode: "updates"}).Blocks(host) {
 		s.mu.Unlock()
 		s.blocked("HTTPS/HTTP", host, c.RemoteAddr().String())
 		return
 	}
-	s.flows[c] = flow{host, c}
+	s.flows[c] = flow{conn: c, mac: mac}
 	s.allowed++
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.flows, c); s.mu.Unlock() }()
@@ -368,7 +454,7 @@ func (s *Service) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var c Config
-		err = json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&c)
+		err = json.NewDecoder(io.LimitReader(r.Body, ConfigInputLimit)).Decode(&c)
 		if err == nil {
 			err = s.set(c)
 		}
@@ -413,6 +499,16 @@ func Serve(ctx context.Context) error {
 		return err
 	}
 	defer dnsTCP.Close()
+	allUDP, err := net.ListenPacket("udp4", ":5355")
+	if err != nil {
+		return err
+	}
+	defer allUDP.Close()
+	allTCP, err := net.Listen("tcp4", ":5355")
+	if err != nil {
+		return err
+	}
+	defer allTCP.Close()
 	// procd guarantees one instance. Refuse to remove any non-socket path.
 	if st, e := os.Lstat(SocketPath); e == nil {
 		if st.Mode()&os.ModeSocket == 0 {
@@ -433,16 +529,21 @@ func Serve(ctx context.Context) error {
 	if err = ApplyFirewall(c); err != nil {
 		return err
 	}
-	if c.Mode != "off" {
-		if warning := reconnect(c.MAC, c.Mode == "all"); warning != "" {
+	if c.Active() {
+		if warning := reconnectChanged(changedDevices(Config{}, c), deviceAddresses()); warning != "" {
 			s.lastError = warning
 		}
 	}
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 6)
 	udpServer := &dns.Server{PacketConn: udp, Handler: dns.HandlerFunc(s.dns), MaxTCPQueries: 32}
 	tcpServer := &dns.Server{Listener: dnsTCP, Handler: dns.HandlerFunc(s.dns), IdleTimeout: func() time.Duration { return 15 * time.Second }, MaxTCPQueries: 32}
+	allHandler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) { s.dnsMode("all", w, req) })
+	allUDPServer := &dns.Server{PacketConn: allUDP, Handler: allHandler, MaxTCPQueries: 32}
+	allTCPServer := &dns.Server{Listener: allTCP, Handler: allHandler, IdleTimeout: func() time.Duration { return 15 * time.Second }, MaxTCPQueries: 32}
 	go func() { errCh <- udpServer.ActivateAndServe() }()
 	go func() { errCh <- tcpServer.ActivateAndServe() }()
+	go func() { errCh <- allUDPServer.ActivateAndServe() }()
+	go func() { errCh <- allTCPServer.ActivateAndServe() }()
 	api := &http.Server{Handler: http.HandlerFunc(s.api), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 60 * time.Second}
 	go func() { errCh <- api.Serve(control) }()
 	go func() {
@@ -464,6 +565,8 @@ func Serve(ctx context.Context) error {
 	defer ticker.Stop()
 	defer udpServer.Shutdown()
 	defer tcpServer.Shutdown()
+	defer allUDPServer.Shutdown()
+	defer allTCPServer.Shutdown()
 	defer api.Close()
 	for {
 		select {

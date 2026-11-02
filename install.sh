@@ -23,7 +23,7 @@ if [ -e /etc/nintendo-control.json ]; then
  [ ! -L /etc/nintendo-control.json ] || { echo 'Refusing symlink configuration.' >&2; exit 1; }
  ./nintendo-guard validate < /etc/nintendo-control.json > "$work/config.json"
 else
- printf '%s\n' '{"mode":"off","mac":"","upstream":"127.0.0.1:53"}' > "$work/config.json"
+ printf '%s\n' '{"devices":[],"upstream":"127.0.0.1:53"}' > "$work/config.json"
 fi
 NINTENDO_GUARD_CONFIG="$work/config.json" ./nintendo-guard rules > "$work/rules.nft"
 nft -c -f "$work/rules.nft"

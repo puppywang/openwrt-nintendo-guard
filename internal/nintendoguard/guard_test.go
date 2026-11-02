@@ -31,7 +31,7 @@ func TestPolicy(t *testing.T) {
 		{"all", "example.org", true},
 		{"off", "sun.p01.lp1.d4c.srv.nintendo.net", false},
 	} {
-		if got := (Config{Mode: tc.mode}).Blocks(tc.host); got != tc.want {
+		if got := (Device{Mode: tc.mode}).Blocks(tc.host); got != tc.want {
 			t.Errorf("%s %s = %v", tc.mode, tc.host, got)
 		}
 	}
@@ -44,21 +44,21 @@ func TestValidationAndRules(t *testing.T) {
 		}
 	}
 	c, err := (Config{Mode: "updates", MAC: "02:AA:BB:CC:DD:01"}).Validate()
-	if err != nil || c.MAC != "02:aa:bb:cc:dd:01" {
+	if err != nil || c.Devices[0].MAC != "02:aa:bb:cc:dd:01" {
 		t.Fatal(c, err)
 	}
-	if _, err := (Config{Mode: "bogus", MAC: c.MAC}).Validate(); err == nil {
+	if _, err := (Config{Mode: "bogus", MAC: c.Devices[0].MAC}).Validate(); err == nil {
 		t.Fatal("accepted unknown mode")
 	}
 	rules := c.Rules()
-	if !strings.Contains(rules, "priority -110") || strings.Count(rules, "ether saddr") != strings.Count(rules, c.MAC) || strings.Contains(rules, "flush ruleset") {
+	if !strings.Contains(rules, "priority -110") || strings.Contains(rules, "flush ruleset") {
 		t.Fatal(rules)
 	}
 	if !strings.Contains(rules, c.Fingerprint()) {
 		t.Fatal("missing firewall identity")
 	}
-	c.Mode = "all"
-	if !strings.Contains(c.Rules(), "ether saddr "+c.MAC+" counter reject") || !strings.Contains(c.Rules(), "th dport != { 53, 67, 5354, 5443 }") {
+	c.Devices[0].Mode = "all"
+	if !strings.Contains(c.Rules(), "ether saddr "+c.Devices[0].MAC+" counter reject") || !strings.Contains(c.Rules(), "th dport != { 53, 67, 5355 }") {
 		t.Fatal("full isolation missing")
 	}
 }
@@ -150,7 +150,7 @@ func (r *response) TsigTimersOnly(bool)         {}
 func (r *response) Hijack()                     {}
 
 func TestDNSBlockingAndRingBound(t *testing.T) {
-	s := &Service{config: Config{Mode: "updates"}}
+	s := &Service{config: Config{Devices: []Device{{Mode: "updates"}}}}
 	for i := 0; i < 40; i++ {
 		q := new(dns.Msg)
 		q.SetQuestion("sun.p01.lp1.d4c.srv.nintendo.net.", dns.TypeAAAA)

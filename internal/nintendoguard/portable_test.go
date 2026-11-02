@@ -13,7 +13,7 @@ func TestPortableConfig(t *testing.T) {
 	if err != nil || c.Upstream != "127.0.0.1:53" {
 		t.Fatal(c, err)
 	}
-	for _, value := range []string{"localhost:53", "127.0.0.1:5354", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:53; reboot"} {
+	for _, value := range []string{"localhost:53", "127.0.0.1:5354", "127.0.0.1:5355", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:53; reboot"} {
 		if _, err := (Config{Mode: "off", Upstream: value}).Validate(); err == nil {
 			t.Errorf("accepted %q", value)
 		}
@@ -74,7 +74,7 @@ func TestUpstreamTCPFallback(t *testing.T) {
 			t.Fatal("DNS test server not ready")
 		}
 	}
-	s := &Service{config: Config{Mode: "updates", Upstream: tcp.Addr().String()}}
+	s := &Service{config: Config{Devices: []Device{{Mode: "updates"}, {Mode: "all"}}, Upstream: tcp.Addr().String()}}
 	q := new(dns.Msg)
 	q.SetQuestion("atum.p01.lp1.d4c.srv.nintendo.net.", dns.TypeA)
 	w := new(response)

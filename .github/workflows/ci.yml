@@ -27,6 +27,7 @@ jobs:
       - run: go vet ./...
       - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - run: node --check luci/nintendo.js
+      - run: node tests/luci.test.js
       - run: |
           for script in install.sh uninstall.sh packaging/lifecycle.sh scripts/build_apk_host.sh luci/nintendo-control.init luci/nintendo-control.rpc luci/nintendo-control-firewall; do
             sh -n "$script"

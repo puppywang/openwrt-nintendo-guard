@@ -65,12 +65,18 @@ def main():
         def lifecycle(action):run("chroot",root,"/usr/libexec/nintendo-control-package",action,env=dict(os.environ,PATH="/usr/sbin:/usr/bin:/sbin:/bin"))
         lifecycle("configure")
         config=root/"etc/nintendo-control.json"
-        assert json.loads(config.read_text())["mode"]=="off"
+        assert json.loads(config.read_text())["devices"]==[]
         config.write_text('{"mode":"updates","mac":"02:aa:bb:cc:dd:01","upstream":"127.0.0.1:53"}\n')
         saved=config.read_bytes();lifecycle("configure");assert config.read_bytes()==saved
         cache=root/"tmp/luci-indexcache.example.json";cache.write_text("{}")
         lifecycle("ui");assert not cache.exists()
         print("PASS real lifecycle: default-off, saved configuration, service and LuCI refresh",flush=True)
+        # Multi-device settings also survive lifecycle and removal unchanged.
+        config.write_text(json.dumps({"devices":[
+            {"name":"Switch 2","mac":"02:aa:bb:cc:dd:01","mode":"updates"},
+            {"name":"Switch","mac":"02:aa:bb:cc:dd:02","mode":"all"},
+        ],"upstream":"127.0.0.1:53"})+"\n")
+        saved=config.read_bytes();lifecycle("configure");assert config.read_bytes()==saved
         replacement=Path(work)/"backend-r2.apk"
         apk_file(apk,replacement,"nintendo-guard",version+"-r2","x86_64",payload(ROOT/"build/amd64/nintendo-guard"),BACKEND_DEPS)
         run(*common,"add","--upgrade",replacement)

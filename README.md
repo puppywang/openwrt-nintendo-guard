@@ -14,10 +14,10 @@
 | 只拦截系统更新 | 拦截已知更新检查、固件下载和最低版本查询域名；保留游戏 CDN |
 | 拦截全部任天堂服务 | 通过断开该设备经路由器的外网/跨网段访问实现；第三方游戏联网也停止 |
 
-- 按 MAC 匹配，DHCP 地址变化不需要重配；当前只支持一个目标设备。
+- 支持最多 64 个设备条目，每台按 MAC 独立设置等级；可同时混用 Switch / Switch 2。DHCP 地址变化不需要重配，Wi-Fi 和有线网卡可分别添加。
 - DNS 过滤 + HTTPS SNI / HTTP Host 检查，覆盖仍使用缓存 IP 的常见连接。
 - 不解密 HTTPS，不安装证书；允许的连接按原始字节转发。
-- 页面显示已保存配置、规则状态、设备 IP、计数和最近拦截记录。
+- 页面支持添加、命名、移除设备，逐台显示等级和 IP；显示总计数和带来源的最近拦截记录。
 - 配置持久保存，支持 procd 开机启动和防火墙重载恢复。
 - 不依赖公共拦截 DNS、AI Proxy 或付费代理服务。
 
@@ -35,19 +35,19 @@
 
 | 系统 | 检查架构 | 下载文件 |
 | --- | --- | --- |
-| 新版 PonWrt / OpenWrt，使用 apk | `apk --print-arch` | 对应架构后端 `.apk` + `luci-app-nintendo-guard-0.1.2-r1.noarch.apk` |
-| 使用 opkg 的 OpenWrt | `opkg print-architecture` | 对应架构后端 `.ipk` + `luci-app-nintendo-guard_0.1.2-1_all.ipk` |
+| 新版 PonWrt / OpenWrt，使用 apk | `apk --print-arch` | 对应架构后端 `.apk` + `luci-app-nintendo-guard-0.2.0-r1.noarch.apk` |
+| 使用 opkg 的 OpenWrt | `opkg print-architecture` | 对应架构后端 `.ipk` + `luci-app-nintendo-guard_0.2.0-1_all.ipk` |
 
 例如 ZN504 / PonWrt 的架构是 `aarch64_cortex-a53`，应下载：
 
-- `nintendo-guard-0.1.2-r1.aarch64_cortex-a53.apk`
-- `luci-app-nintendo-guard-0.1.2-r1.noarch.apk`
+- `nintendo-guard-0.2.0-r1.aarch64_cortex-a53.apk`
+- `luci-app-nintendo-guard-0.2.0-r1.noarch.apk`
 
 将这两个文件上传到路由器 `/tmp`，与 Release 的 `SHA256SUMS` 核对后安装：
 
 ```sh
 cd /tmp
-apk add --allow-untrusted ./nintendo-guard-0.1.2-r1.aarch64_cortex-a53.apk ./luci-app-nintendo-guard-0.1.2-r1.noarch.apk
+apk add --allow-untrusted ./nintendo-guard-0.2.0-r1.aarch64_cortex-a53.apk ./luci-app-nintendo-guard-0.2.0-r1.noarch.apk
 ```
 
 这些是本项目自行构建的第三方包，未使用 OpenWrt 官方签名；`--allow-untrusted` 只用于此次本地文件安装。若 LuCI 上传安装时因签名被拒绝，请用上面的 SSH 命令。
@@ -55,22 +55,43 @@ apk add --allow-untrusted ./nintendo-guard-0.1.2-r1.aarch64_cortex-a53.apk ./luc
 旧版 OpenWrt 的对应安装方式（同样需要 firewall4）：
 
 ```sh
-opkg install ./nintendo-guard_0.1.2-1_aarch64_cortex-a53.ipk ./luci-app-nintendo-guard_0.1.2-1_all.ipk
+opkg install ./nintendo-guard_0.2.0-1_aarch64_cortex-a53.ipk ./luci-app-nintendo-guard_0.2.0-1_all.ipk
 ```
 
 依赖会由包管理器检查。后端依赖 firewall4、nftables、conntrack、ip-full、procd 和 busybox；界面依赖 luci-base 和 rpcd。
 
-安装完成后重新登录 LuCI，进入 **网络 → Nintendo 控制**，填写自己的主机 MAC，再选择模式并保存。首次安装默认为关闭；已有 `/etc/nintendo-control.json` 会原样保留。文件由包管理器登记，不需要另运行 `install.sh`。
+安装完成后重新登录 LuCI，进入 **网络 → Nintendo 控制**，添加设备，填写名称、主机 MAC，逐台选择模式后保存。首次安装的设备列表为空，不会自动拦截；已有 `/etc/nintendo-control.json` 会保留。文件由包管理器登记，不需要另运行 `install.sh`。
 
-上游 DNS 默认 `127.0.0.1:53`，通常是路由器的 dnsmasq。使用其他 DNS 服务时填写实际 **IP:端口**。不要指向本程序的 `5354`，也不要让上游 DNS 转回本程序。脚本安装迁移到原生包前，可先备份该 JSON。
+上游 DNS 默认 `127.0.0.1:53`，通常是路由器的 dnsmasq。使用其他 DNS 服务时填写实际 **IP:端口**。不要指向本程序的 `5354` / `5355`，也不要让上游 DNS 转回本程序。脚本安装迁移到原生包前，可先备份该 JSON。
+
+### 多设备与旧版升级
+
+0.2.0 起，每行设备独立设置，不再共用一个全局等级。保存设备列表会整体替换已保存列表；仅编辑名称或调整顺序不会重建设备连接。未修改策略的设备保留已有代理连接。
+
+旧版 `{"mode":"updates","mac":"…"}` 会自动读取为一个设备，保留 MAC 和等级；保存时写成新格式。旧版空 MAC 的 off 配置迁移为空列表。升级时同时更新后端和 LuCI 包，再重新登录或刷新页面。新版列表不能直接交给 0.1.x 后端，回退前需恢复升级前的配置备份。
+
+配置示例（示例 MAC 请替换为自己的设备）：
+
+```json
+{
+  "upstream": "127.0.0.1:53",
+  "devices": [
+    {"name": "客厅 Switch 2", "mac": "02:aa:bb:cc:dd:01", "mode": "updates"},
+    {"name": "卧室 Switch", "mac": "02:aa:bb:cc:dd:02", "mode": "all"},
+    {"name": "临时放行", "mac": "02:aa:bb:cc:dd:03", "mode": "off"}
+  ]
+}
+```
+
+更新过滤使用 5354（DNS）和 5443（HTTP/HTTPS），全部拦截使用独立的 5355 DNS 端口。监听端口按模式限制允许的 MAC，避免不同等级串用；策略匹配不依赖 IP 地址。设备名称和当前 IP 用于界面显示。
 
 ### 压缩包手工安装（含旧版 v0.1.0）
 
 `.tar.gz` 是另一种分发方式，不能直接交给 apk/opkg 或 LuCI 软件包上传页面。若要使用，下载匹配 CPU 的包，解压后执行：
 
 ```sh
-tar -xzf nintendo-guard-v0.1.2-linux-arm64.tar.gz
-cd nintendo-guard-v0.1.2-linux-arm64
+tar -xzf nintendo-guard-v0.2.0-linux-arm64.tar.gz
+cd nintendo-guard-v0.2.0-linux-arm64
 sh install.sh
 ```
 
@@ -87,7 +108,7 @@ nslookup sun.p01.lp1.d4c.srv.nintendo.net 127.0.0.1:5354
 nslookup atum.p01.lp1.d4c.srv.nintendo.net 127.0.0.1:5354
 ```
 
-在 updates 模式中，第一个应返回 NXDOMAIN，第二个应由上游正常解析。这些自测记录的来源是路由器本机，不代表主机实际请求。off 模式下直接查询保护端口会收到 REFUSED，正常设备 DNS 不经过该端口。
+有设备启用 updates 时，5354 端口的第一个查询应返回 NXDOMAIN，第二个应由上游正常解析。5355 端口对应 all 模式，所有域名均返回 NXDOMAIN；没有设备使用对应模式时，该端口返回 REFUSED。这些自测记录来自路由器本机。关闭或未登记设备的 DNS 不经过保护端口。
 
 查看状态：`nintendo-guard status`。规则检查显示的是配置/专属表状态；仍需结合目标设备的实际流量验证整个网络路径。
 
@@ -104,7 +125,7 @@ nslookup atum.p01.lp1.d4c.srv.nintendo.net 127.0.0.1:5354
 
 ## 关闭与卸载
 
-临时关闭：在页面选择“关闭拦截”并保存。
+临时关闭：把相应设备设为“关闭拦截”并保存。移除设备也会解除它的拦截；移除全部设备后清除专属规则表。
 
 原生包安装请使用对应的包管理器：
 
@@ -127,12 +148,12 @@ opkg remove luci-app-nintendo-guard nintendo-guard
 ```sh
 go test ./...
 go vet ./...
-python3 scripts/build.py --version v0.1.2
+python3 scripts/build.py --version v0.2.0
 ```
 
-原生包构建还需 Linux 和带 mkpkg 的完整 apk-tools 3。可先执行 `sh scripts/build_apk_host.sh`，再执行 `fakeroot python3 scripts/build_native.py --version v0.1.2 --apk build/apk-tools/out/src/apk`。
+原生包构建还需 Linux 和带 mkpkg 的完整 apk-tools 3。可先执行 `sh scripts/build_apk_host.sh`，再执行 `fakeroot python3 scripts/build_native.py --version v0.2.0 --apk build/apk-tools/out/src/apk`。
 
-构建结果在 `dist/v0.1.2/`，包含安装脚本、对应架构的静态二进制、许可证和 SHA256SUMS。`--arch arm64` 可只构建一个架构。
+构建结果在 `dist/v0.2.0/`，包含安装脚本、对应架构的静态二进制、许可证和 SHA256SUMS。`--arch arm64` 可只构建一个架构。
 
 Linux 网络测试需要 root、nftables、conntrack、iproute2、openssl，并只在隔离网络命名空间内运行：
 
@@ -154,11 +175,11 @@ GitHub Actions 运行单元测试、race detector、网络测试及多架构构�
 
 发布使用仓库自动提供的 `GITHUB_TOKEN`，仅发布任务申请 `contents: write`，无需设置个人 Token 或手动上传二进制。
 
-维护者准备好修改后，更新 `VERSION`，可选添加 `docs/release-vX.Y.Z.md`，提交并推送，然后推送标签。例如下一版：
+维护者准备好修改后，更新 `VERSION`，可选添加 `docs/release-vX.Y.Z.md`，提交并推送，然后推送标签。例如下一个修订版：
 
 ```sh
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 不必先在 GitHub 网页创建 Release。有对应说明文件时采用该文件，否则自动生成发布说明。当前版本仍以预览版形式发布。

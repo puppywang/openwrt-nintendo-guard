@@ -35,7 +35,7 @@ func run() error {
 		return nil
 	case "validate":
 		var c guard.Config
-		if err := json.NewDecoder(io.LimitReader(os.Stdin, 8192)).Decode(&c); err != nil {
+		if err := json.NewDecoder(io.LimitReader(os.Stdin, guard.ConfigInputLimit)).Decode(&c); err != nil {
 			return err
 		}
 		c, err := c.Validate()
@@ -66,7 +66,7 @@ func run() error {
 	case "status", "set":
 		var input io.Reader
 		if args[0] == "set" {
-			input = io.LimitReader(os.Stdin, 8192)
+			input = io.LimitReader(os.Stdin, guard.ConfigInputLimit)
 		}
 		b, err := guard.Call(args[0], input)
 		if err != nil {
@@ -76,7 +76,7 @@ func run() error {
 		return nil
 	case "rpc":
 		if len(args) == 2 && args[1] == "list" {
-			fmt.Print(`{"status":{},"set":{"mode":"","mac":"","upstream":""}}`)
+			fmt.Print(`{"status":{},"set":{"devices":[],"upstream":""}}`)
 			return nil
 		}
 		if len(args) != 3 || args[1] != "call" || (args[2] != "status" && args[2] != "set") {
@@ -84,7 +84,7 @@ func run() error {
 		}
 		var input io.Reader
 		if args[2] == "set" {
-			input = io.LimitReader(os.Stdin, 8192)
+			input = io.LimitReader(os.Stdin, guard.ConfigInputLimit)
 		}
 		b, err := guard.Call(args[2], input)
 		if err != nil {

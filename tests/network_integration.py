@@ -23,14 +23,28 @@ def command(*args, **kwargs):
     return subprocess.run(list(args), capture_output=True, text=True, timeout=10, check=True, **kwargs)
 
 
-def client(kind, host, destination):
+def client(kind, host, destination, port="53"):
     try:
-        if kind == "dns":
+        if kind in ("dns", "dns-tcp"):
             q = struct.pack("!HHHHHH", 123, 0x100, 1, 0, 0, 0)
             q += b"".join(bytes([len(part)]) + part.encode() for part in host.split(".")) + b"\0\0\1\0\1"
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(2); sock.sendto(q, (destination, 53))
-                reply = sock.recv(4096)
+            if kind == "dns-tcp":
+                with socket.create_connection((destination, int(port)), 2) as sock:
+
+                    def receive(size):
+                        result = b""
+                        while len(result) < size:
+                            part = sock.recv(size-len(result))
+                            if not part: raise OSError("DNS TCP connection closed")
+                            result += part
+                        return result
+
+                    sock.sendall(struct.pack("!H", len(q)) + q)
+                    reply = receive(struct.unpack("!H", receive(2))[0])
+            else:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(2); sock.sendto(q, (destination, int(port)))
+                    reply = sock.recv(4096)
             return {"rcode": reply[3] & 15}
         if kind == "udp":
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -107,6 +121,7 @@ def main(binary):
                 return ns
             target = network("t", "192.0.2", MAC)
             other = network("c", "203.0.113", "02:aa:bb:cc:dd:02")
+            free = network("f", "198.18.0", "02:aa:bb:cc:dd:04")
             server = network("s", "198.51.100", "02:aa:bb:cc:dd:03")
             cert, key = work+"/cert.pem", work+"/key.pem"
             command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=test.invalid")
@@ -139,8 +154,8 @@ def main(binary):
                 config.update(mode=mode, mac=MAC)
                 status = json.loads(command(binary,"set",input=json.dumps(config),env=env).stdout)
                 assert status["firewall_ok"], status
-            def query(ns, kind, name=GAME, dest="198.51.100.2"):
-                return json.loads(command("ip","netns","exec",ns,sys.executable,SELF,"--client",kind,name,dest).stdout)
+            def query(ns, kind, name=GAME, dest="198.51.100.2", port="53"):
+                return json.loads(command("ip","netns","exec",ns,sys.executable,SELF,"--client",kind,name,dest,port).stdout)
             set_mode("updates")
             assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
             assert query(target,"dns",GAME,"192.0.2.1")["rcode"] == 0
@@ -161,7 +176,48 @@ def main(binary):
             assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 0
             assert query(target,"tls",UPDATE)["ok"]
             print("PASS off: normal route restored", flush=True)
-            set_mode("updates")
+            # Concurrent, independent policies. The off entry and an unlisted
+            # client both retain their normal network path.
+            config = {"upstream":"127.0.0.1:15353", "devices":[
+                {"name":"Switch 2", "mac":MAC, "mode":"updates"},
+                {"name":"Switch", "mac":"02:aa:bb:cc:dd:02", "mode":"all"},
+                {"name":"Disabled", "mac":"02:aa:bb:cc:dd:04", "mode":"off"},
+            ]}
+            def save():
+                status = json.loads(command(binary,"set",input=json.dumps(config),env=env).stdout)
+                assert status["firewall_ok"], status
+                return status
+            save()
+            for kind in ("dns", "dns-tcp"):
+                assert query(target,kind,UPDATE,"192.0.2.1")["rcode"] == 3
+                assert query(target,kind,GAME,"192.0.2.1")["rcode"] == 0
+                assert query(other,kind,GAME,"203.0.113.1")["rcode"] == 3
+                assert query(free,kind,UPDATE,"198.18.0.1")["rcode"] == 0
+                assert "rcode" not in query(other,kind,GAME,"203.0.113.1","5354")
+                assert "rcode" not in query(target,kind,GAME,"192.0.2.1","5355")
+                assert "rcode" not in query(free,kind,GAME,"198.18.0.1","5354")
+            assert query(target,"tls")["ok"]
+            assert not query(target,"tls",UPDATE)["ok"]
+            assert not query(other,"tls")["ok"]
+            assert not query(other,"udp")["ok"]
+            assert query(free,"tls",UPDATE)["ok"]
+            assert query(free,"udp")["ok"]
+            print("PASS mixed updates/all/off: independent DNS/TCP/UDP and listener access", flush=True)
+            # Invalid saves must leave every device's existing policy in place.
+            invalid = dict(config,devices=config["devices"]+[config["devices"][0]])
+            result = subprocess.run([binary,"set"],input=json.dumps(invalid),env=env,capture_output=True,text=True,timeout=10)
+            assert result.returncode != 0
+            assert query(other,"dns",GAME,"203.0.113.1")["rcode"] == 3
+            config["devices"].pop(1); save()
+            assert query(other,"tls",UPDATE)["ok"]
+            assert query(other,"udp")["ok"]
+            assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
+            # Same MAC, different IP: policy follows Ethernet identity.
+            command("ip","netns","exec",target,"ip","addr","add","192.0.2.9/24","dev","ng-peer-t")
+            command("ip","netns","exec",target,"ip","addr","del","192.0.2.2/24","dev","ng-peer-t")
+            assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
+            assert query(target,"tls")["ok"]
+            print("PASS invalid save, device removal and changed client IP", flush=True)
             stop(guard); guard = start()
             assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
             command("nft","delete","table","inet","nintendo_control")
@@ -172,6 +228,10 @@ def main(binary):
                 time.sleep(.2)
             assert restored
             print("PASS restart persistence and table recovery", flush=True)
+            config["devices"] = []; save()
+            assert query(target,"tls",UPDATE)["ok"]
+            assert query(other,"tls",UPDATE)["ok"]
+            print("PASS empty list restores normal networking", flush=True)
         finally:
             for proc in reversed(processes): stop(proc)
             for sock in dns_sockets: sock.close()
