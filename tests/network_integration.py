@@ -127,17 +127,38 @@ def main(binary):
             command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=test.invalid")
             helper = spawn(["ip", "netns", "exec", server, sys.executable, SELF, "--server", cert, key], stdout=subprocess.PIPE, text=True)
             assert helper.stdout.readline().strip() == "ready"
+            def dns_reply(packet):
+                reply = packet[:2] + b"\x81\x80\0\1\0\1\0\0\0\0" + packet[12:]
+                return reply + b"\xc0\x0c\0\1\0\1\0\0\0\x3c\0\4" + socket.inet_aton("198.51.100.2")
             def dns_server(sock):
                 while True:
                     try:
                         packet, address = sock.recvfrom(4096)
-                        reply = packet[:2] + b"\x81\x80\0\1\0\1\0\0\0\0" + packet[12:]
-                        reply += b"\xc0\x0c\0\1\0\1\0\0\0\x3c\0\4" + socket.inet_aton("198.51.100.2")
-                        sock.sendto(reply, address)
+                        sock.sendto(dns_reply(packet), address)
                     except OSError: return
+            def dns_tcp_server(sock):
+                while True:
+                    try: conn, _ = sock.accept()
+                    except OSError: return
+                    with conn:
+                        conn.settimeout(2)
+                        try:
+                            def receive(size):
+                                result = b""
+                                while len(result) < size:
+                                    part = conn.recv(size-len(result))
+                                    if not part: raise OSError("DNS TCP connection closed")
+                                    result += part
+                                return result
+                            reply = dns_reply(receive(struct.unpack("!H",receive(2))[0]))
+                            conn.sendall(struct.pack("!H",len(reply))+reply)
+                        except OSError: pass
             for port in (53, 15353):
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); sock.bind(("0.0.0.0", port)); dns_sockets.append(sock)
                 threading.Thread(target=dns_server, args=(sock,), daemon=True).start()
+            tcp_dns = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+            tcp_dns.bind(("0.0.0.0",53)); tcp_dns.listen(8); dns_sockets.append(tcp_dns)
+            threading.Thread(target=dns_tcp_server,args=(tcp_dns,),daemon=True).start()
             config = {"mode":"off", "mac":"", "upstream":"127.0.0.1:15353"}
             Path(env["NINTENDO_GUARD_CONFIG"]).write_text(json.dumps(config))
             binary = str(Path(binary).resolve())
