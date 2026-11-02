@@ -171,6 +171,8 @@ def main(binary):
                     time.sleep(.1)
                 raise RuntimeError("service readiness timeout")
             guard = start()
+            command(binary,"set",input=json.dumps(config),env=env)
+            assert json.loads(Path(env["NINTENDO_GUARD_CONFIG"]).read_text())["devices"] == []
             def set_mode(mode):
                 config.update(mode=mode, mac=MAC)
                 status = json.loads(command(binary,"set",input=json.dumps(config),env=env).stdout)
@@ -234,8 +236,9 @@ def main(binary):
             assert query(other,"udp")["ok"]
             assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
             # Same MAC, different IP: policy follows Ethernet identity.
-            command("ip","netns","exec",target,"ip","addr","add","192.0.2.9/24","dev","ng-peer-t")
             command("ip","netns","exec",target,"ip","addr","del","192.0.2.2/24","dev","ng-peer-t")
+            command("ip","netns","exec",target,"ip","addr","add","192.0.2.9/24","dev","ng-peer-t")
+            command("ip","netns","exec",target,"ip","route","replace","default","via","192.0.2.1")
             assert query(target,"dns",UPDATE,"192.0.2.1")["rcode"] == 3
             assert query(target,"tls")["ok"]
             print("PASS invalid save, device removal and changed client IP", flush=True)

@@ -262,9 +262,8 @@ func (s *Service) set(c Config) error {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	old := s.current()
-	if old.Upstream == c.Upstream && slices.Equal(old.Devices, c.Devices) && firewallOK(c) {
-		return nil
-	}
+	// Always persist a save, including an unchanged legacy configuration: this
+	// is the point at which its on-disk format becomes a devices list.
 	b, _ := json.MarshalIndent(c, "", "  ")
 	tmp, err := os.CreateTemp(filepath.Dir(ConfigPath), ".nintendo-control-*")
 	if err != nil {
