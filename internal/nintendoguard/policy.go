@@ -42,7 +42,30 @@ var UpdateDomains = []string{
 var nintendoDomainText string
 
 var NintendoDomains = strings.Fields(nintendoDomainText)
-var ConnectionTestDomains = []string{"conntest.nintendowifi.net", "ctest.cdn.nintendo.net"}
+
+// NintendoClients Connection Test wiki (2025-12-23 revision): these HTTP
+// connectivity checks have a small documented response and can be handled
+// locally, without allowing the device to contact Nintendo.
+var ConnectionTestDomains = []string{
+	"conntest.nintendowifi.net",        // legacy Switch/90DNS check
+	"ctest.cdn.nintendo.net",           // Switch 1
+	"ctest.p01.ctest.srv.nintendo.net", // Switch 2
+}
+
+// Exact host exceptions which MUST keep their original upstream protocol.
+// Speed tests transfer actual data (Switch 1 HTTP; Switch 2 HTTPS). The
+// HTTPS /v1/ip and /v1/time APIs require authentic Nintendo TLS certificates.
+// The IPv6 check is intentionally not forged: its result must reflect whether
+// IPv6 really works. This policy alone cannot supply missing router IPv6.
+var PassThroughTestDomains = []string{
+	"ctest-dl-lp1.cdn.nintendo.net",           // Switch 1 HTTP download
+	"ctest-ul-lp1.cdn.nintendo.net",           // Switch 1 HTTP upload
+	"api.hac.lp1.ctest.srv.nintendo.net",      // Switch 1 HTTPS APIs
+	"ctest-ipv6.p01.ctest.srv.nintendo.net",   // Switch 2 IPv6 connectivity
+	"ctest-dl.p01.lp1.ctest.srv.nintendo.net", // Switch 2 HTTPS download
+	"ctest-ul.p01.lp1.ctest.srv.nintendo.net", // Switch 2 HTTPS upload
+	"api.p01.lp1.ctest.srv.nintendo.net",      // Switch 2 HTTPS APIs
+}
 
 type policyListener struct {
 	mode             string
@@ -68,14 +91,22 @@ func normalizeHost(host string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 }
 
-func connectionTest(host string) bool {
-	for _, domain := range ConnectionTestDomains {
-		if normalizeHost(host) == domain {
+func exactDomain(host string, domains []string) bool {
+	host = normalizeHost(host)
+	for _, domain := range domains {
+		if host == domain {
 			return true
 		}
 	}
 	return false
 }
+
+// Local HTTP response, not suitable for speed tests or HTTPS APIs.
+func connectionTest(host string) bool { return exactDomain(host, ConnectionTestDomains) }
+
+func passThroughTest(host string) bool { return exactDomain(host, PassThroughTestDomains) }
+
+func testEndpoint(host string) bool { return connectionTest(host) || passThroughTest(host) }
 
 func (c Config) Validate() (Config, error) {
 	if c.Upstream == "" {
@@ -134,7 +165,7 @@ func (d Device) Blocks(host string) bool {
 	case "updates":
 		domains = UpdateDomains
 	case "nintendo":
-		if connectionTest(host) {
+		if testEndpoint(host) {
 			return false
 		}
 		domains = NintendoDomains

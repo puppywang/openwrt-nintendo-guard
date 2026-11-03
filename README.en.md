@@ -8,7 +8,7 @@ Modes: **off** (installation default), **known system-update endpoints**, **Nint
 
 The service redirects filtered devices' DNS and TCP 80/443 traffic, filters DNS names and TLS SNI / HTTP Host, and forwards allowed connections without TLS decryption. DNS upstream defaults to `127.0.0.1:53` and is configurable. It does not require AI Proxy or an external blocking-DNS provider.
 
-Nintendo-only mode uses a built-in list of 36 domains and dedicated endpoints checked against a pinned 90DNS revision. Unrelated domains retain the configured upstream and normal IPv4 HTTP/TLS/TCP/UDP access. Two HTTP connection-test names are answered locally. DNS uses port 5356 and HTTP/TLS uses 5444. Existing `all` entries retain full isolation; the UI now labels this explicitly. Upgrades preserve every device mode. See [sources and scope](docs/nintendo-services.md).
+Nintendo-only mode uses a built-in list of 36 domains and dedicated endpoints checked against a pinned 90DNS revision. Unrelated domains retain the configured upstream and normal IPv4 HTTP/TLS/TCP/UDP access. The three HTTP connectivity-check names for Switch 1/2 are answered locally, while seven exact speed-test, IPv6-check, and HTTPS API hostnames retain genuine upstream connections (IPv6 requires a working network route). DNS uses port 5356 and HTTP/TLS uses 5444. Existing `all` entries retain full isolation; the UI now labels this explicitly. Upgrades preserve every device mode. See [sources and scope](docs/nintendo-services.md).
 
 ## Install
 

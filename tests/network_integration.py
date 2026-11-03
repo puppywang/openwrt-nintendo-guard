@@ -65,16 +65,22 @@ def client(kind, host, destination, port="53"):
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.settimeout(2); sock.sendto(b"ping", (destination, 9999))
                 return {"ok": sock.recv(64) == b"ping"}
-        with socket.create_connection((destination, 443 if kind == "tls" else 80), 2) as raw:
-            sock = ssl._create_unverified_context().wrap_socket(raw, server_hostname=host) if kind == "tls" else raw
+        using_tls = kind in ("tls", "tls-post")
+        uploading = kind in ("http-post", "tls-post")
+        with socket.create_connection((destination, 443 if using_tls else 80), 2) as raw:
+            sock = ssl._create_unverified_context().wrap_socket(raw, server_hostname=host) if using_tls else raw
             with sock:
-                sock.sendall(("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n").encode())
+                if uploading:
+                    body = b"u" * 1048576
+                    sock.sendall(("POST /1m HTTP/1.0\r\nHost: " + host + "\r\nContent-Length: 1048576\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\n\r\n").encode() + body)
+                else:
+                    sock.sendall(("GET / HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n").encode())
                 reply=b""
                 while len(reply)<16384:
                     chunk=sock.recv(2048)
                     if not chunk: break
                     reply+=chunk
-                return {"ok": b"200" in reply,"local_test":b"X-Organization: Nintendo" in reply,"body":reply.split(b"\r\n\r\n",1)[-1].decode("utf-8","replace")}
+                return {"ok": b"200" in reply,"local_test":b"X-Organization: Nintendo" in reply,"posted":b"X-Fixture-Upload: yes" in reply,"body":reply.split(b"\r\n\r\n",1)[-1].decode("utf-8","replace")}
     except (OSError, ssl.SSLError) as error:
         return {"ok": False, "error": type(error).__name__}
 
@@ -85,6 +91,19 @@ def fixture(cert, key):
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        def do_POST(self):
+            length=int(self.headers.get("Content-Length", "0"))
+            if self.path != "/1m" or length != 1048576:
+                self.send_error(400); return
+            remaining=length
+            while remaining:
+                chunk=self.rfile.read(min(65536,remaining))
+                if not chunk: self.send_error(400); return
+                remaining-=len(chunk)
+            self.send_response(200)
+            self.send_header("X-Fixture-Upload", "yes")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         def log_message(self, *_):
             pass
     for port in (80, 443):
@@ -259,10 +278,29 @@ def main(binary):
                 assert not query(restricted,kind,GAME)["ok"] # cached IP, no DNS
                 assert not query(restricted,kind,"nega-lp1-upload.s3.us-east-1.amazonaws.com")["ok"]
             assert query(restricted,"udp")["ok"]
-            for host in ("conntest.nintendowifi.net","ctest.cdn.nintendo.net"):
+            # Both generations' simple HTTP connection checks must answer
+            # locally. Speed tests (real byte transfers) and HTTPS APIs must
+            # be exact-host passthroughs, not fake HTTP 'ok' responses.
+            local_checks=("conntest.nintendowifi.net", "ctest.cdn.nintendo.net", "ctest.p01.ctest.srv.nintendo.net")
+            upstream_http=("ctest-dl-lp1.cdn.nintendo.net", "ctest-ul-lp1.cdn.nintendo.net", "ctest-ipv6.p01.ctest.srv.nintendo.net")
+            upstream_https=("api.hac.lp1.ctest.srv.nintendo.net", "ctest-dl.p01.lp1.ctest.srv.nintendo.net", "ctest-ul.p01.lp1.ctest.srv.nintendo.net", "api.p01.lp1.ctest.srv.nintendo.net")
+            for host in local_checks:
+                dns_test=query(restricted,"dns",host,"192.0.3.1")
+                assert dns_test["addresses"]==["192.0.3.1"],dns_test
                 test=query(restricted,"http",host,"192.0.3.1")
                 assert test["ok"] and test["local_test"],test
-            print("PASS four modes: selective Nintendo blocking, unrelated DNS/TLS/HTTP/UDP, local connection test, listener isolation", flush=True)
+                assert query(restricted,"dns","fake"+host,"192.0.3.1")["addresses"]==["0.0.0.0"]
+            for kind,hosts in (("http",upstream_http),("tls",upstream_https)):
+                for host in hosts:
+                    dns_test=query(restricted,"dns",host,"192.0.3.1")
+                    assert dns_test["addresses"]==["198.51.100.2"],(host,dns_test)
+                    test=query(restricted,kind,host)
+                    assert test["ok"] and not test["local_test"],(host,test)
+                    assert query(restricted,"dns","fake"+host,"192.0.3.1")["addresses"]==["0.0.0.0"]
+            for kind,host in (("http-post","ctest-ul-lp1.cdn.nintendo.net"),("tls-post","ctest-ul.p01.lp1.ctest.srv.nintendo.net")):
+                upload=query(restricted,kind,host)
+                assert upload["ok"] and upload["posted"] and not upload["local_test"],(host,upload)
+            print("PASS four modes: selective Nintendo blocking, ordinary traffic, all 9 NintendoClients endpoints + legacy HTTP check, 1 MiB HTTP/TLS uploads, listener isolation", flush=True)
             # Invalid saves must leave every device's existing policy in place.
             invalid = dict(config,devices=config["devices"]+[config["devices"][0]])
             result = subprocess.run([binary,"set"],input=json.dumps(invalid),env=env,capture_output=True,text=True,timeout=10)

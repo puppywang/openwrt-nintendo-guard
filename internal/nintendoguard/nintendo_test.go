@@ -41,6 +41,33 @@ func TestNintendoDomains(t *testing.T) {
 			t.Fatal("test exception too broad", host)
 		}
 	}
+	// NintendoClients documents 9 current Switch 1/2 checks. The three
+	// plain HTTP connectivity hosts are locally emulated; speed tests, IPv6
+	// check and real HTTPS APIs are exact-host upstream exceptions.
+	if len(ConnectionTestDomains) != 3 || len(PassThroughTestDomains) != 7 {
+		t.Fatal("connection test inventory incomplete")
+	}
+	for _, host := range PassThroughTestDomains {
+		if d.Blocks(host) || connectionTest(host) || !passThroughTest(host) || !testEndpoint(strings.ToUpper(host)+".") {
+			t.Fatal("missing authentic upstream test exception", host)
+		}
+		for _, neighbor := range []string{"fake" + host, "sub." + host} {
+			if !d.Blocks(neighbor) || testEndpoint(neighbor) {
+				t.Fatal("connection test exception too broad", neighbor)
+			}
+		}
+		if d.Blocks(host+".example.org") || testEndpoint(host+".example.org") {
+			t.Fatal("hostname boundary violation", host)
+		}
+	}
+	for _, host := range []string{"accounts.nintendo.com", "sun.p01.lp1.d4c.srv.nintendo.net", "api2.p01.lp1.ctest.srv.nintendo.net", "ctest-dl-notallow.p01.lp1.ctest.srv.nintendo.net"} {
+		if !d.Blocks(host) {
+			t.Fatal("unrelated Nintendo service accidentally allowed", host)
+		}
+	}
+	if (Device{Mode: "updates"}).Blocks("ctest.p01.ctest.srv.nintendo.net") {
+		t.Fatal("connection test blocked in updates-only mode")
+	}
 	c, err := (Config{Devices: []Device{{MAC: "02:aa:bb:cc:dd:01", Mode: "nintendo"}}}).Validate()
 	if err != nil || !c.Active() {
 		t.Fatal(c, err)
@@ -103,6 +130,9 @@ func TestNintendoDNSReplies(t *testing.T) {
 }
 
 func TestConnectionTestHTTP(t *testing.T) {
+	if raw := connectionTestHTTP("ctest.p01.ctest.srv.nintendo.net", []byte("POST /1m HTTP/1.1\r\n\r\n")); !bytes.HasPrefix(raw, []byte("HTTP/1.1 405 Method Not Allowed")) {
+		t.Fatal("local connectivity handler must not impersonate a speed-test upload")
+	}
 	for _, host := range ConnectionTestDomains {
 		for _, method := range []string{"GET", "HEAD"} {
 			req, _ := http.NewRequest(method, "http://"+host+"/", nil)
@@ -113,11 +143,17 @@ func TestConnectionTestHTTP(t *testing.T) {
 			}
 			body, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if err != nil || resp.StatusCode != 200 || resp.Header.Get("X-Organization") != "Nintendo" {
+			if err != nil || resp.StatusCode != 200 || resp.Header.Get("X-Organization") != "Nintendo" || resp.Header.Get("Cache-Control") != "max-age=0, no-cache, no-store" || resp.Header.Get("Pragma") != "no-cache" || resp.Header.Get("Date") == "" || resp.Header.Get("Expires") == "" {
 				t.Fatal(resp, err)
+			}
+			if host != "conntest.nintendowifi.net" && (resp.Header.Get("Content-Type") != "text/plain" || resp.ContentLength != 2) {
+				t.Fatal("connection test expected text/plain ok", resp)
 			}
 			if method == "GET" && len(body) == 0 {
 				t.Fatal("empty connection-test response")
+			}
+			if method == "GET" && host == "ctest.p01.ctest.srv.nintendo.net" && string(body) != "ok" {
+				t.Fatalf("Switch 2 expects an exact 'ok' response, got %q", body)
 			}
 			if method == "HEAD" && len(body) != 0 {
 				t.Fatal("HEAD returned a body")

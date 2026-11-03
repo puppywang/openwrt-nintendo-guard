@@ -57,7 +57,9 @@ return view.extend({
 				E('tr', { 'class': 'tr table-titles' }, [ E('th', {}, '时间'), E('th', {}, '设备 / 来源'), E('th', {}, '类型'), E('th', {}, '域名') ])
 			].concat(events.map(function(e) { return E('tr', { 'class': 'tr' }, [ E('td', {}, new Date(e.time).toLocaleString()), E('td', {}, (names[e.mac] ? names[e.mac] + ' · ' : '') + (e.client || '')), E('td', {}, e.protocol), E('td', { 'style': 'word-break:break-all' }, e.host) ]); }))) : E('p', {}, '暂无拦截记录。无需在主机上主动检查更新来测试。'));
 			domainList.replaceChildren(E('ul', {}, (s.update_domains || []).map(function(d) { return E('li', {}, E('code', {}, d)); })));
-			nintendoList.replaceChildren(E('p', {}, '按完整域名和子域名匹配。联网检测由路由器本地响应：' + (s.connection_test_domains || []).join(', ')),
+			nintendoList.replaceChildren(
+				E('p', {}, '仅精确匹配的联网检测域名由路由器本地响应：' + (s.connection_test_domains || []).join(', ')),
+				E('p', {}, '精确透传到真实服务器的测速、IPv6 检测和 HTTPS API：' + (s.pass_through_test_domains || []).join(', ')),
 				E('ul', {}, (s.nintendo_domains || []).map(function(d) { return E('li', {}, E('code', {}, d)); })));
 		};
 		var setBusy = function(busy) {
@@ -101,7 +103,7 @@ return view.extend({
 			]),
 			E('ul', {}, [
 				E('li', {}, [ E('strong', {}, '只拦截系统更新：'), '拦截已知更新检查、固件下载和最低系统版本查询（sun / atumn / aqua），保留游戏 CDN（atum）。部分游戏或 DLC 的版本检查仍可能报错。' ]),
-				E('li', {}, [ E('strong', {}, '只拦截任天堂服务：'), '参考 90DNS 的任天堂域名与专用上传端点，拦截商店、联机、更新和遥测。其他域名、普通 TCP/UDP 流量保留；联网检测由路由器本地响应。无需使用公共 90DNS。' ]),
+				E('li', {}, [ E('strong', {}, '只拦截任天堂服务：'), '参考 90DNS 拦截任天堂商店、联机、更新和遥测。Switch 1/2 的 HTTP 联网检测本地返回正确响应；精确放行 NintendoClients 文档列出的测速和 HTTPS API（真实连接 Nintendo），并保留其他普通网络。IPv6 检测需要路由器本身有 IPv6；不会伪造 HTTPS 证书。' ]),
 				E('li', {}, [ E('strong', {}, '禁止该设备全部外网：'), '禁止该设备经路由器访问互联网及其他网段，所有域名和第三方游戏联网都会停止；同一局域网内的设备直连不受此转发规则影响。旧版 all 模式保留这一行为。' ]),
 				E('li', {}, '启用时会阻止该设备的 IPv6 转发、QUIC 和加密 DNS 专用端口，拒绝无法识别域名的 HTTPS/HTTP 连接。'),
 				E('li', {}, '第一档按已知域名拦截，未来新增域名可能需要补充。两档均无法控制主机已下载的固件、卡带更新或改连其他网络。')

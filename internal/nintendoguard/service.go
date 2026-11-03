@@ -335,6 +335,7 @@ func (s *Service) status() map[string]any {
 		"error": s.lastError, "started": s.started.Format(time.RFC3339),
 		"update_domains":   UpdateDomains,
 		"nintendo_domains": NintendoDomains, "connection_test_domains": ConnectionTestDomains,
+		"pass_through_test_domains": PassThroughTestDomains,
 	}
 	s.mu.RUnlock()
 	addresses := deviceAddresses()
@@ -409,7 +410,10 @@ func (s *Service) dnsMode(mode string, w dns.ResponseWriter, req *dns.Msg) {
 		resp = new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeServerFailure)
 	}
-	if err == nil && mode == "nintendo" {
+	// For an explicitly approved test hostname, retain its genuine upstream
+	// DNS chain even if an intermediate CDN alias is under Nintendo's domain.
+	// Generic aliases pointing TO Nintendo services still remain blocked.
+	if err == nil && mode == "nintendo" && !testEndpoint(req.Question[0].Name) {
 		for _, rr := range resp.Answer {
 			target := ""
 			switch alias := rr.(type) {

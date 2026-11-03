@@ -3,7 +3,9 @@ package nintendoguard
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -52,13 +54,24 @@ func nintendoReply(req *dns.Msg, ip net.IP, blocked bool) *dns.Msg {
 }
 
 func connectionTestHTTP(host string, request []byte) []byte {
+	// These are the connection-check responses documented by NintendoClients.
+	// The example's fixed historical Date/Expires cannot be reused: use the
+	// current HTTP date and equivalent non-cacheable semantics instead.
+	method := strings.SplitN(string(request), " ", 2)[0]
+	if method != "GET" && method != "HEAD" {
+		return []byte("HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	}
 	body, contentType := "ok", "text/plain"
 	if normalizeHost(host) == "conntest.nintendowifi.net" {
 		body = "<html><head><title>HTML Page</title></head><body>This is test.html page</body></html>"
 		contentType = "text/html"
 	}
-	header := fmt.Sprintf("HTTP/1.1 200 OK\r\nX-Organization: Nintendo\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", contentType, len(body))
-	if strings.HasPrefix(string(request), "HEAD ") {
+	now := time.Now().UTC().Format(http.TimeFormat)
+	header := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\nExpires: %s\r\nCache-Control: max-age=0, no-cache, no-store\r\nPragma: no-cache\r\nDate: %s\r\nConnection: close\r\nX-Organization: Nintendo\r\nContent-Type: %s\r\n\r\n", len(body), now, now, contentType)
+	// Connection: close is truthful: the transparent proxy handles one request
+	// per socket, unlike the persistent sample connection. GET/HEAD response
+	// status, content and cache semantics still match the protocol.
+	if method == "HEAD" {
 		return []byte(header)
 	}
 	return []byte(header + body)
